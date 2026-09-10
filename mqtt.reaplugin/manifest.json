@@ -1,0 +1,65 @@
+{
+  "id": "mqtt.reaplugin",
+  "author": "meldavy",
+  "name": "MQTT",
+  "description": "Publish machine state to an MQTT broker and receive control commands. Wire-compatible with the de1app MQTT plugin.",
+  "version": "0.1.0",
+  "apiVersion": 1,
+  "permissions": [
+    "log",
+    "api",
+    "pluginStorage",
+    "events.machine",
+    "events.shots",
+    "events.workflow",
+    "network.tcp",
+    "network.tls",
+    "network.websocket"
+  ],
+  "settings": {
+    "Host": {
+      "type": "string",
+      "label": "Broker host",
+      "description": "Hostname or IP of the MQTT broker. Empty disables the integration."
+    },
+    "Port": {
+      "type": "number",
+      "label": "Broker port",
+      "default": 8883,
+      "description": "MQTT broker port. 8883 for TLS, 1883 for plain TCP."
+    },
+    "Username": {
+      "type": "string",
+      "label": "Username",
+      "description": "Broker username (optional)."
+    },
+    "Password": {
+      "type": "string",
+      "label": "Password",
+      "secure": true,
+      "description": "Broker password (optional)."
+    },
+    "ClientId": {
+      "type": "string",
+      "label": "Client ID",
+      "description": "MQTT client ID. Leave empty to use the auto-generated unique ID."
+    },
+    "TopicPrefix": {
+      "type": "string",
+      "label": "Topic prefix",
+      "description": "Prefix for state and command topics. Leave empty to use de1plus/<unique id>."
+    },
+    "PublishIntervalMs": {
+      "type": "number",
+      "label": "Publish interval (ms)",
+      "default": 60000,
+      "description": "Idle heartbeat interval in milliseconds (minimum 1000)."
+    },
+    "EnableTls": {
+      "type": "boolean",
+      "label": "Use TLS",
+      "default": true,
+      "description": "Connect to the broker over TLS."
+    }
+  }
+}
