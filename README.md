@@ -27,6 +27,124 @@ Tracking: [decentespresso/decaid#681](https://github.com/decentespresso/decaid/i
 - Reconnect loop with exponential backoff (2 s doubling, capped at 64 s, 15
   attempts); MQTT last will publishes an explicit offline state document.
 
+## Payloads
+
+All state is published to `{topic_prefix}/state` as a single JSON document
+(QoS 1, retained). Below, the auto-generated topic prefix
+`de1plus/<unique_id>` is written as `de1plus/abcd1234`.
+
+Machine awake and idle, no scale connected:
+
+```json
+{
+  "online": true,
+  "de1_connected": true,
+  "scale_connected": false,
+  "state": "Idle",
+  "substate": "ready",
+  "profile": "Medium",
+  "profile_filename": "medium.tcl",
+  "espresso_count": 1234,
+  "steaming_count": 56,
+  "head_temperature": 93.5,
+  "mix_temperature": 92.1,
+  "steam_heater_temperature": 24.0,
+  "wake_state": true,
+  "steam_mode": "Off",
+  "steam_state": false,
+  "water_level_mm": 58.0,
+  "water_level_ml": 1808,
+  "shot_active": false
+}
+```
+
+During a shot with a scale connected (published ~1 s apart while pouring):
+
+```json
+{
+  "online": true,
+  "de1_connected": true,
+  "scale_connected": true,
+  "state": "Espresso",
+  "substate": "pouring",
+  "profile": "Medium",
+  "profile_filename": "medium.tcl",
+  "espresso_count": 1234,
+  "steaming_count": 56,
+  "head_temperature": 93.5,
+  "mix_temperature": 92.1,
+  "steam_heater_temperature": 24.0,
+  "wake_state": true,
+  "steam_mode": "Off",
+  "steam_state": false,
+  "water_level_mm": 57.0,
+  "water_level_ml": 1808,
+  "shot_active": true,
+  "shot_weight_g": 18.4
+}
+```
+
+After the shot completes, `shot_active` becomes `false` and the shot record
+fills in (`shot_id`, `shot_started_at`, `shot_duration_s`, and
+`shot_weight_g` as the final yield):
+
+```json
+{
+  "online": true,
+  "de1_connected": true,
+  "scale_connected": true,
+  "state": "Idle",
+  "substate": "ready",
+  "profile": "Medium",
+  "profile_filename": "medium.tcl",
+  "espresso_count": 1235,
+  "steaming_count": 56,
+  "head_temperature": 93.5,
+  "mix_temperature": 92.1,
+  "steam_heater_temperature": 24.0,
+  "wake_state": true,
+  "steam_mode": "Off",
+  "steam_state": false,
+  "water_level_mm": 57.0,
+  "water_level_ml": 1808,
+  "shot_active": false,
+  "shot_id": "a1b2c3d4",
+  "shot_started_at": "2026-09-12T13:14:15.000Z",
+  "shot_duration_s": 27.5,
+  "shot_weight_g": 36.2
+}
+```
+
+Machine asleep, no scale, no shot history: the 17 de1app-compatible fields
+plus `shot_active: false` (shot fields without values are omitted).
+
+Machine link down or app dead (also the last-will payload, retained):
+
+```json
+{"online": false, "de1_connected": false}
+```
+
+When the machine is connected, all fields above are always present except the
+shot record fields (`shot_id`, `shot_started_at`, `shot_duration_s`,
+`shot_weight_g`), which appear after the first completed shot;
+`shot_weight_g` additionally requires a scale. Full field reference:
+[doc/protocol.md](doc/protocol.md#state-document-tstate).
+
+### Commands
+
+Send plain-text UTF-8 payloads to `{topic_prefix}/command`
+(e.g. `de1plus/abcd1234/command`):
+
+| Payload | Action |
+|---------|--------|
+| `wake` | Wake the machine |
+| `sleep` | Put the machine to sleep |
+| `steam_on` / `steam_off` | Toggle the steam heater |
+| `profile <name>` | Select a profile by title, e.g. `profile Medium` |
+| `profile_filename <file>` | Select a profile by filename, e.g. `profile_filename medium.tcl` |
+
+Unknown payloads are logged and ignored.
+
 ## Install
 
 ### From a GitHub release (tracked, auto-updates)
