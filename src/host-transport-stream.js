@@ -1,18 +1,67 @@
-function base64ToBytes(b64) {
-  const bin = atob(b64);
-  const bytes = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) {
-    bytes[i] = bin.charCodeAt(i);
+function utf8Encode(str) {
+  const out = [];
+  for (let i = 0; i < str.length; i++) {
+    let c = str.charCodeAt(i);
+    if (c >= 0xd800 && c <= 0xdbff && i + 1 < str.length) {
+      const next = str.charCodeAt(i + 1);
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        c = 0x10000 + ((c - 0xd800) << 10) + (next - 0xdc00);
+        i++;
+      }
+    }
+    if (c < 0x80) out.push(c);
+    else if (c < 0x800) out.push(0xc0 | (c >> 6), 0x80 | (c & 0x3f));
+    else if (c < 0x10000) out.push(0xe0 | (c >> 12), 0x80 | ((c >> 6) & 0x3f), 0x80 | (c & 0x3f));
+    else out.push(0xf0 | (c >> 18), 0x80 | ((c >> 12) & 0x3f), 0x80 | ((c >> 6) & 0x3f), 0x80 | (c & 0x3f));
   }
-  return bytes;
+  return new Uint8Array(out);
+}
+
+const B64_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+const B64_LOOKUP = (() => {
+  const t = new Uint8Array(256).fill(255);
+  for (let i = 0; i < B64_ALPHABET.length; i++) t[B64_ALPHABET.charCodeAt(i)] = i;
+  return t;
+})();
+
+function base64ToBytes(b64) {
+  let end = b64.length;
+  while (end > 0 && b64.charCodeAt(end - 1) === 61) end--;
+  const out = new Uint8Array((end * 3) >> 2);
+  let acc = 0;
+  let bits = 0;
+  let o = 0;
+  for (let i = 0; i < end; i++) {
+    const v = B64_LOOKUP[b64.charCodeAt(i)];
+    if (v === 255) continue;
+    acc = (acc << 6) | v;
+    bits += 6;
+    if (bits >= 8) {
+      bits -= 8;
+      out[o++] = (acc >> bits) & 0xff;
+    }
+  }
+  return o === out.length ? out : out.subarray(0, o);
 }
 
 function bytesToBase64(bytes) {
-  let bin = "";
-  for (let i = 0; i < bytes.length; i++) {
-    bin += String.fromCharCode(bytes[i]);
+  let out = "";
+  let i = 0;
+  for (; i + 2 < bytes.length; i += 3) {
+    const n = (bytes[i] << 16) | (bytes[i + 1] << 8) | bytes[i + 2];
+    out += B64_ALPHABET[(n >> 18) & 63] + B64_ALPHABET[(n >> 12) & 63] +
+      B64_ALPHABET[(n >> 6) & 63] + B64_ALPHABET[n & 63];
   }
-  return btoa(bin);
+  const rem = bytes.length - i;
+  if (rem === 1) {
+    const n = bytes[i] << 16;
+    out += B64_ALPHABET[(n >> 18) & 63] + B64_ALPHABET[(n >> 12) & 63] + "==";
+  } else if (rem === 2) {
+    const n = (bytes[i] << 16) | (bytes[i + 1] << 8);
+    out += B64_ALPHABET[(n >> 18) & 63] + B64_ALPHABET[(n >> 12) & 63] +
+      B64_ALPHABET[(n >> 6) & 63] + "=";
+  }
+  return out;
 }
 
 class TinyEmitter {
@@ -79,7 +128,7 @@ export class HostTransportStream extends TinyEmitter {
       case "data": {
         const bytes = event.dataType === "binary"
           ? base64ToBytes(event.data)
-          : new TextEncoder().encode(event.data);
+          : utf8Encode(String(event.data));
         this.emit("data", bytes);
         break;
       }
@@ -101,14 +150,15 @@ export class HostTransportStream extends TinyEmitter {
     this.emit("close");
   }
 
-  write(chunk, cb) {
+  write(chunk, encodingOrCb, maybeCb) {
+    const cb = typeof encodingOrCb === "function" ? encodingOrCb : maybeCb;
     if (this._closed || !this._writable) {
       const err = new Error("stream is closed");
       if (typeof cb === "function") cb(err);
       else this.emit("error", err);
       return false;
     }
-    const bytes = chunk instanceof Uint8Array ? chunk : new TextEncoder().encode(String(chunk));
+    const bytes = chunk instanceof Uint8Array ? chunk : utf8Encode(String(chunk));
     this._pendingWrites.push({ bytes, cb });
     this._flush();
     return true;

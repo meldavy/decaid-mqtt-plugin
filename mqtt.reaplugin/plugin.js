@@ -12045,20 +12045,65 @@ In order to be iterable, non-array objects must have a [Symbol.iterator]() metho
   var mqtt_esm_default = ZT();
 
   // src/host-transport-stream.js
-  function base64ToBytes(b64) {
-    const bin = atob(b64);
-    const bytes = new Uint8Array(bin.length);
-    for (let i = 0; i < bin.length; i++) {
-      bytes[i] = bin.charCodeAt(i);
+  function utf8Encode(str) {
+    const out = [];
+    for (let i = 0; i < str.length; i++) {
+      let c = str.charCodeAt(i);
+      if (c >= 55296 && c <= 56319 && i + 1 < str.length) {
+        const next = str.charCodeAt(i + 1);
+        if (next >= 56320 && next <= 57343) {
+          c = 65536 + (c - 55296 << 10) + (next - 56320);
+          i++;
+        }
+      }
+      if (c < 128) out.push(c);
+      else if (c < 2048) out.push(192 | c >> 6, 128 | c & 63);
+      else if (c < 65536) out.push(224 | c >> 12, 128 | c >> 6 & 63, 128 | c & 63);
+      else out.push(240 | c >> 18, 128 | c >> 12 & 63, 128 | c >> 6 & 63, 128 | c & 63);
     }
-    return bytes;
+    return new Uint8Array(out);
+  }
+  var B64_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  var B64_LOOKUP = (() => {
+    const t = new Uint8Array(256).fill(255);
+    for (let i = 0; i < B64_ALPHABET.length; i++) t[B64_ALPHABET.charCodeAt(i)] = i;
+    return t;
+  })();
+  function base64ToBytes(b64) {
+    let end = b64.length;
+    while (end > 0 && b64.charCodeAt(end - 1) === 61) end--;
+    const out = new Uint8Array(end * 3 >> 2);
+    let acc = 0;
+    let bits = 0;
+    let o = 0;
+    for (let i = 0; i < end; i++) {
+      const v = B64_LOOKUP[b64.charCodeAt(i)];
+      if (v === 255) continue;
+      acc = acc << 6 | v;
+      bits += 6;
+      if (bits >= 8) {
+        bits -= 8;
+        out[o++] = acc >> bits & 255;
+      }
+    }
+    return o === out.length ? out : out.subarray(0, o);
   }
   function bytesToBase64(bytes) {
-    let bin = "";
-    for (let i = 0; i < bytes.length; i++) {
-      bin += String.fromCharCode(bytes[i]);
+    let out = "";
+    let i = 0;
+    for (; i + 2 < bytes.length; i += 3) {
+      const n = bytes[i] << 16 | bytes[i + 1] << 8 | bytes[i + 2];
+      out += B64_ALPHABET[n >> 18 & 63] + B64_ALPHABET[n >> 12 & 63] + B64_ALPHABET[n >> 6 & 63] + B64_ALPHABET[n & 63];
     }
-    return btoa(bin);
+    const rem = bytes.length - i;
+    if (rem === 1) {
+      const n = bytes[i] << 16;
+      out += B64_ALPHABET[n >> 18 & 63] + B64_ALPHABET[n >> 12 & 63] + "==";
+    } else if (rem === 2) {
+      const n = bytes[i] << 16 | bytes[i + 1] << 8;
+      out += B64_ALPHABET[n >> 18 & 63] + B64_ALPHABET[n >> 12 & 63] + B64_ALPHABET[n >> 6 & 63] + "=";
+    }
+    return out;
   }
   var TinyEmitter = class {
     constructor() {
@@ -12118,7 +12163,7 @@ In order to be iterable, non-array objects must have a [Symbol.iterator]() metho
       if (this._closed) return;
       switch (event.type) {
         case "data": {
-          const bytes = event.dataType === "binary" ? base64ToBytes(event.data) : new TextEncoder().encode(event.data);
+          const bytes = event.dataType === "binary" ? base64ToBytes(event.data) : utf8Encode(String(event.data));
           this.emit("data", bytes);
           break;
         }
@@ -12138,14 +12183,15 @@ In order to be iterable, non-array objects must have a [Symbol.iterator]() metho
       this._writable = false;
       this.emit("close");
     }
-    write(chunk, cb2) {
+    write(chunk, encodingOrCb, maybeCb) {
+      const cb2 = typeof encodingOrCb === "function" ? encodingOrCb : maybeCb;
       if (this._closed || !this._writable) {
         const err = new Error("stream is closed");
         if (typeof cb2 === "function") cb2(err);
         else this.emit("error", err);
         return false;
       }
-      const bytes = chunk instanceof Uint8Array ? chunk : new TextEncoder().encode(String(chunk));
+      const bytes = chunk instanceof Uint8Array ? chunk : utf8Encode(String(chunk));
       this._pendingWrites.push({ bytes, cb: cb2 });
       this._flush();
       return true;
@@ -12325,8 +12371,9 @@ In order to be iterable, non-array objects must have a [Symbol.iterator]() metho
 
   // src/loopback.js
   var LOCAL_API_BASE = "http://localhost:8080";
+  var LOCAL_WS_BASE = "ws://localhost:8080";
   function createLoopbackJsonStream({ host, path, onJson, onStatus, log }) {
-    const url = `${LOCAL_API_BASE}${path}`;
+    const url = `${LOCAL_WS_BASE}${path}`;
     let handle = null;
     let stopped = false;
     let reconnectTimer = null;
@@ -12479,7 +12526,9 @@ In order to be iterable, non-array objects must have a [Symbol.iterator]() metho
       steamDisabled: true,
       ecoSteamOn: false,
       shot: null,
-      lastDocJson: null
+      lastDocJson: null,
+      lastState: null,
+      lastSubstate: null
     };
     function publishedState() {
       if (!runtime.lastDocJson) return void 0;
@@ -12540,6 +12589,10 @@ In order to be iterable, non-array objects must have a [Symbol.iterator]() metho
       });
       scheduleHeartbeat(doc);
     }
+    function ensureHeartbeat() {
+      if (!bridge || heartbeatTimer) return;
+      scheduleHeartbeat(buildDoc());
+    }
     function scheduleHeartbeat(doc) {
       if (heartbeatTimer) {
         clearTimeout(heartbeatTimer);
@@ -12559,13 +12612,17 @@ In order to be iterable, non-array objects must have a [Symbol.iterator]() metho
       const state = mapState(payload.state?.state ?? payload.state);
       const substate = mapSubstate(payload.state?.substate ?? payload.substate) ?? "";
       const active = isShotActive(state, substate);
+      const transitioned = state !== runtime.lastState || substate !== runtime.lastSubstate;
+      runtime.lastState = state;
+      runtime.lastSubstate = substate;
       if (active && runtime.shot?.active !== true) {
         runtime.shot = { active: true };
         runtime.shotWeightG = null;
       } else if (!active && runtime.shot?.active === true) {
         runtime.shot = { ...runtime.shot, active: false };
       }
-      publishIfChanged();
+      if (transitioned) publishIfChanged();
+      else ensureHeartbeat();
     }
     async function onShotStored(payload) {
       const id = payload?.id;
@@ -12692,10 +12749,9 @@ In order to be iterable, non-array objects must have a [Symbol.iterator]() metho
         host,
         path: "/ws/v1/machine/waterLevels",
         onJson: (data) => {
-          if (typeof data.currentLevel === "number" && data.currentLevel !== runtime.waterLevelMm) {
-            runtime.waterLevelMm = data.currentLevel;
-            publishIfChanged();
-          }
+          if (typeof data.currentLevel !== "number") return;
+          runtime.waterLevelMm = data.currentLevel;
+          ensureHeartbeat();
         },
         log
       });

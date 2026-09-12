@@ -38,6 +38,8 @@ export function createPlugin(host) {
     ecoSteamOn: false,
     shot: null,
     lastDocJson: null,
+    lastState: null,
+    lastSubstate: null,
   };
 
   function publishedState() {
@@ -107,6 +109,11 @@ export function createPlugin(host) {
     scheduleHeartbeat(doc);
   }
 
+  function ensureHeartbeat() {
+    if (!bridge || heartbeatTimer) return;
+    scheduleHeartbeat(buildDoc());
+  }
+
   function scheduleHeartbeat(doc) {
     if (heartbeatTimer) {
       clearTimeout(heartbeatTimer);
@@ -127,13 +134,21 @@ export function createPlugin(host) {
     const state = mapState(payload.state?.state ?? payload.state);
     const substate = mapSubstate(payload.state?.substate ?? payload.substate) ?? "";
     const active = isShotActive(state, substate);
+    const transitioned = state !== runtime.lastState || substate !== runtime.lastSubstate;
+    runtime.lastState = state;
+    runtime.lastSubstate = substate;
     if (active && runtime.shot?.active !== true) {
       runtime.shot = { active: true };
       runtime.shotWeightG = null;
     } else if (!active && runtime.shot?.active === true) {
       runtime.shot = { ...runtime.shot, active: false };
     }
-    publishIfChanged();
+    // Telemetry (temperatures, pressure, flow) arrives ~5x/second. Publishing
+    // each tick would make publishIntervalMs meaningless, so only a real
+    // state/substate transition publishes immediately; the heartbeat carries
+    // the rest at the configured cadence.
+    if (transitioned) publishIfChanged();
+    else ensureHeartbeat();
   }
 
   async function onShotStored(payload) {
@@ -269,10 +284,9 @@ export function createPlugin(host) {
       host,
       path: "/ws/v1/machine/waterLevels",
       onJson: (data) => {
-        if (typeof data.currentLevel === "number" && data.currentLevel !== runtime.waterLevelMm) {
-          runtime.waterLevelMm = data.currentLevel;
-          publishIfChanged();
-        }
+        if (typeof data.currentLevel !== "number") return;
+        runtime.waterLevelMm = data.currentLevel;
+        ensureHeartbeat();
       },
       log,
     });
