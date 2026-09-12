@@ -429,7 +429,7 @@ var __mqttBundle = (() => {
   };
 
   // src/command-handler.js
-  function createCommandHandler(dispatcher, log) {
+  function createCommandHandler(dispatcher, log, onProfileCommand) {
     return function handleCommandMessage(topic, payload) {
       const parsed = parseCommand(String(payload));
       if (!parsed) {
@@ -438,6 +438,9 @@ var __mqttBundle = (() => {
       }
       dispatcher.dispatch(parsed).then((result) => {
         if (result && result.ok) {
+          if (onProfileCommand && (parsed.kind === "profile" || parsed.kind === "profile_filename")) {
+            onProfileCommand();
+          }
           log(`command ${parsed.kind} applied`);
         } else {
           log(`command ${parsed.kind} not applied: ${result?.reason ?? result?.status}`);
@@ -12548,6 +12551,7 @@ In order to be iterable, non-array objects must have a [Symbol.iterator]() metho
         heartbeatTimer = null;
         if (!bridge) return;
         publishNow();
+        pollWorkflow();
       }, interval);
     }
     function onStateUpdate(payload) {
@@ -12598,11 +12602,23 @@ In order to be iterable, non-array objects must have a [Symbol.iterator]() metho
       }
     }
     async function onWorkflowUpdated(payload) {
+      await applyWorkflowPayload(payload);
+    }
+    async function applyWorkflowPayload(payload) {
       const title = payload?.profile?.title;
       if (typeof title === "string" && title !== runtime.profile) {
         runtime.profile = title;
         runtime.profileFilename = await resolveProfileFilename(title);
         publishIfChanged();
+      }
+    }
+    async function pollWorkflow() {
+      try {
+        const res = await fetch(`${LOCAL_API_BASE}/api/v1/workflow`);
+        if (!res.ok) return;
+        await applyWorkflowPayload(await res.json());
+      } catch (e) {
+        log(`workflow poll failed: ${e?.message ?? e}`);
       }
     }
     async function resolveProfileFilename(title) {
@@ -12644,12 +12660,13 @@ In order to be iterable, non-array objects must have a [Symbol.iterator]() metho
       bridge = createMqttBridge({
         host,
         config,
-        onCommand: createCommandHandler(dispatcher, log),
+        onCommand: createCommandHandler(dispatcher, log, () => pollWorkflow()),
         log
       });
       bridge.onConnectedHandler = () => {
         publishNow();
         refreshCounts();
+        pollWorkflow();
       };
       bridge.start();
       scaleStream = createLoopbackJsonStream({

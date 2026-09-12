@@ -50,6 +50,21 @@ POST http://<tablet>:8080/api/v1/plugins/install/github-branch
 Zip the `mqtt.reaplugin/` directory and install it from the Plugins settings
 screen (local ZIP), or copy it into the app's plugin folder.
 
+## Compatibility
+
+- Requires Decaid **0.8.5 or later** (that is the first stable release with
+  the plugin `host.transport` network permissions this plugin needs).
+- The manifest deliberately does not request `events.workflow` (0.8.6+ only);
+  instead the current profile title is polled from `GET /api/v1/workflow` on
+  the heartbeat cadence, so `profile`/`profile_filename` stay correct on both
+  0.8.5 and newer builds. After a `profile`/`profile_filename` command the
+  state is re-polled immediately.
+- The manifest carries explicit empty `api` and `drivers` arrays because
+  Decaid's manifest parser requires a (possibly empty) list for `api`.
+- On 0.8.5 the broker password is stored in regular settings storage; secure
+  credential storage arrives with later Decaid versions (`secure: true` is
+  already declared).
+
 ## Settings
 
 Configured in Decaid's plugin settings screen:

@@ -16,7 +16,6 @@ const PERMISSIONS = [
   "pluginStorage",
   "events.machine",
   "events.shots",
-  "events.workflow",
   "network.tcp",
   "network.tls",
   "network.websocket",

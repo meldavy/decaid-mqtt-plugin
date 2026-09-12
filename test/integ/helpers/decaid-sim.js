@@ -7,6 +7,7 @@ export function createDecaidSim() {
     shots: [],
     steams: [],
     profiles: [],
+    workflow: { profile: { title: "" } },
     scaleStatus: "connected",
     pendingScaleSamples: [],
   };
@@ -99,6 +100,7 @@ export function createDecaidSim() {
     if (req.method === "GET" && url.pathname === "/api/v1/shots") return json(200, state.shots);
     if (req.method === "GET" && url.pathname === "/api/v1/steams") return json(200, state.steams);
     if (req.method === "GET" && url.pathname === "/api/v1/profiles") return json(200, state.profiles);
+    if (req.method === "GET" && url.pathname === "/api/v1/workflow") return json(200, state.workflow);
     const shotMatch = url.pathname.match(/^\/api\/v1\/shots\/([^/]+)$/);
     if (req.method === "GET" && shotMatch) {
       const shot = state.shots.find((s) => s.id === decodeURIComponent(shotMatch[1]));

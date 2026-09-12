@@ -98,7 +98,7 @@ test("water level stream maps mm to the de1app ml lookup table", async () => {
   assert.equal(doc.water_level_ml, 1104);
 });
 
-test("workflowUpdated sets profile and resolves the profile filename via REST", async () => {
+test("workflow REST poll sets profile and resolves the profile filename", async () => {
   const { sim, broker, plugin } = env;
   await waitFor(() => broker.publishes.some((p) => p.topic.endsWith("/state")));
   plugin.event("stateUpdate", machineSnapshot());
@@ -107,19 +107,29 @@ test("workflowUpdated sets profile and resolves the profile filename via REST", 
     { id: "lb.json", profile: { title: "Long Black" } },
     { id: "ris.json", profile: { title: "Ristretto" } },
   ];
-
-  plugin.event("workflowUpdated", {
-    id: "wf-1",
-    profile: { title: "Ristretto" },
-    context: { targetDoseWeight: 18.0, targetYield: 36.0 },
-  });
+  sim.state.workflow = { id: "wf-1", profile: { title: "Ristretto" } };
 
   await waitFor(() => latestStateDoc(broker)?.profile === "Ristretto");
   const doc = latestStateDoc(broker);
   assert.equal(doc.profile, "Ristretto");
   assert.equal(doc.profile_filename, "ris.json");
   const fetches = sim.requests.filter((r) => r.path === "/api/v1/profiles");
-  assert.equal(fetches.length, 1);
+  assert.equal(fetches.length, 1, "profile library is fetched once per title change");
+});
+
+test("profile changes are picked up by the heartbeat poll without refetching the library", async () => {
+  const { sim, broker, plugin } = env;
+  await waitFor(() => broker.publishes.some((p) => p.topic.endsWith("/state")));
+  plugin.event("stateUpdate", machineSnapshot());
+  await waitFor(() => latestStateDoc(broker)?.online === true);
+  sim.state.profiles = [{ id: "lb.json", profile: { title: "Long Black" } }];
+  sim.state.workflow = { profile: { title: "Long Black" } };
+  await waitFor(() => latestStateDoc(broker)?.profile === "Long Black");
+
+  sim.state.workflow = { profile: { title: "Ristretto" } };
+  sim.state.profiles = [...sim.state.profiles, { id: "ris.json", profile: { title: "Ristretto" } }];
+  await waitFor(() => latestStateDoc(broker)?.profile === "Ristretto");
+  assert.equal(latestStateDoc(broker).profile_filename, "ris.json");
 });
 
 test("unknown internal state enum names are published verbatim", async () => {

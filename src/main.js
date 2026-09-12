@@ -118,6 +118,7 @@ export function createPlugin(host) {
       heartbeatTimer = null;
       if (!bridge) return;
       publishNow();
+      pollWorkflow();
     }, interval);
   }
 
@@ -171,11 +172,25 @@ export function createPlugin(host) {
   }
 
   async function onWorkflowUpdated(payload) {
+    await applyWorkflowPayload(payload);
+  }
+
+  async function applyWorkflowPayload(payload) {
     const title = payload?.profile?.title;
     if (typeof title === "string" && title !== runtime.profile) {
       runtime.profile = title;
       runtime.profileFilename = await resolveProfileFilename(title);
       publishIfChanged();
+    }
+  }
+
+  async function pollWorkflow() {
+    try {
+      const res = await fetch(`${LOCAL_API_BASE}/api/v1/workflow`);
+      if (!res.ok) return;
+      await applyWorkflowPayload(await res.json());
+    } catch (e) {
+      log(`workflow poll failed: ${e?.message ?? e}`);
     }
   }
 
@@ -220,12 +235,13 @@ export function createPlugin(host) {
     bridge = createMqttBridge({
       host,
       config,
-      onCommand: createCommandHandler(dispatcher, log),
+      onCommand: createCommandHandler(dispatcher, log, () => pollWorkflow()),
       log,
     });
     bridge.onConnectedHandler = () => {
       publishNow();
       refreshCounts();
+      pollWorkflow();
     };
     bridge.start();
 
