@@ -3,7 +3,7 @@
   "author": "meldavy",
   "name": "MQTT",
   "description": "Publish machine state to an MQTT broker and receive control commands. Wire-compatible with the de1app MQTT plugin.",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "apiVersion": 1,
   "permissions": [
     "log",

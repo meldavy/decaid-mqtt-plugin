@@ -1,7 +1,8 @@
 export const LOCAL_API_BASE = "http://localhost:8080";
+export const LOCAL_WS_BASE = "ws://localhost:8080";
 
 export function createLoopbackJsonStream({ host, path, onJson, onStatus, log }) {
-  const url = `${LOCAL_API_BASE}${path}`;
+  const url = `${LOCAL_WS_BASE}${path}`;
   let handle = null;
   let stopped = false;
   let reconnectTimer = null;
