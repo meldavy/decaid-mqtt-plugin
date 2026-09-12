@@ -31,6 +31,8 @@ Tracking: [decentespresso/decaid#681](https://github.com/decentespresso/decaid/i
 
 ### From a GitHub release (tracked, auto-updates)
 
+* To install from your de1, go to plugin settings from the decaid app, and install using github release `meldavy/decaid-mqtt-plugin`.
+
 ```
 POST http://<tablet>:8080/api/v1/plugins/install/github-release
 {"repo": "meldavy/decaid-mqtt-plugin"}
