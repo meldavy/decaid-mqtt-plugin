@@ -82,12 +82,13 @@ export function machineSnapshot(overrides = {}) {
   };
 }
 
-export function shotRecord(id, { weight = 18.5, durationMs = 28400 } = {}) {
+export function shotRecord(id, { weight = 18.5, durationMs = 28400, actualYield } = {}) {
   const start = "2026-09-09T07:15:00.000Z";
   const end = new Date(new Date(start).getTime() + durationMs).toISOString();
   return {
     id,
     timestamp: start,
+    ...(actualYield === undefined ? {} : { annotations: { actualDoseWeight: 18.0, actualYield } }),
     measurements: [
       { machine: { timestamp: start, state: { state: "espresso", substate: "pouring" } }, scale: null },
       {

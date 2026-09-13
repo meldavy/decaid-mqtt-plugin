@@ -1,4 +1,9 @@
-import { normalizeConfig, generateUniqueId, UNIQUE_ID_KEY } from "./config.js";
+import {
+  normalizeConfig,
+  generateUniqueId,
+  UNIQUE_ID_KEY,
+  ACTIVE_SHOT_PUBLISH_INTERVAL_MS,
+} from "./config.js";
 import { buildStateDocument } from "./state-doc.js";
 import { mapState, mapSubstate, isShotActive } from "./mapping.js";
 import { parseCommand } from "./commands.js";
@@ -22,8 +27,9 @@ export function createPlugin(host) {
   let bridge = null;
   let scaleStream = null;
   let waterStream = null;
-  let heartbeatTimer = null;
+  let publishTimer = null;
   let dispatcher = null;
+
 
   const runtime = {
     snapshot: null,
@@ -77,55 +83,42 @@ export function createPlugin(host) {
     });
   }
 
-  function heartbeatIntervalMs(doc) {
-    return doc.shot_active
-      ? 1000
+  // Single publish path. Every message that reaches the broker is built here,
+  // from a document that is refreshed first, so a publish never ships a field
+  // that some other code path forgot to update.
+  //
+  // It is reached from exactly three places: the periodic timer, a main
+  // state/substate change, and the end of a shot. Nothing else publishes.
+  //
+  // The workflow is re-read every time because the profile can be changed from
+  // the app at any moment and Decaid raises no event this plugin can see. The
+  // counts are not: they only move when a shot or steam is recorded, and the
+  // publishes that follow those ask for `full`.
+  async function publish({ full = false } = {}) {
+    if (!bridge) return;
+    await pollWorkflow();
+    if (full) await refreshCounts();
+    if (!bridge) return;
+    const doc = buildDoc();
+    runtime.lastDocJson = JSON.stringify(doc);
+    bridge.publishState(doc, (e) => {
+      if (e) log(`state publish failed: ${e?.message ?? e}`);
+    });
+    armPublishTimer(doc);
+  }
+
+  function armPublishTimer(doc) {
+    if (publishTimer) {
+      clearTimeout(publishTimer);
+      publishTimer = null;
+    }
+    if (!bridge) return;
+    const interval = doc.shot_active
+      ? ACTIVE_SHOT_PUBLISH_INTERVAL_MS
       : config.publishIntervalMs;
-  }
-
-  function publishNow() {
-    if (!bridge) return;
-    const doc = buildDoc();
-    const json = JSON.stringify(doc);
-    runtime.lastDocJson = json;
-    bridge.publishState(doc, (e) => {
-      if (e) log(`state publish failed: ${e?.message ?? e}`);
-    });
-    scheduleHeartbeat(doc);
-  }
-
-  function publishIfChanged() {
-    if (!bridge) return;
-    const doc = buildDoc();
-    const json = JSON.stringify(doc);
-    if (json === runtime.lastDocJson) {
-      scheduleHeartbeat(doc);
-      return;
-    }
-    runtime.lastDocJson = json;
-    bridge.publishState(doc, (e) => {
-      if (e) log(`state publish failed: ${e?.message ?? e}`);
-    });
-    scheduleHeartbeat(doc);
-  }
-
-  function ensureHeartbeat() {
-    if (!bridge || heartbeatTimer) return;
-    scheduleHeartbeat(buildDoc());
-  }
-
-  function scheduleHeartbeat(doc) {
-    if (heartbeatTimer) {
-      clearTimeout(heartbeatTimer);
-      heartbeatTimer = null;
-    }
-    if (!bridge) return;
-    const interval = heartbeatIntervalMs(doc);
-    heartbeatTimer = setTimeout(() => {
-      heartbeatTimer = null;
-      if (!bridge) return;
-      publishNow();
-      pollWorkflow();
+    publishTimer = setTimeout(() => {
+      publishTimer = null;
+      publish();
     }, interval);
   }
 
@@ -143,12 +136,10 @@ export function createPlugin(host) {
     } else if (!active && runtime.shot?.active === true) {
       runtime.shot = { ...runtime.shot, active: false };
     }
-    // Telemetry (temperatures, pressure, flow) arrives ~5x/second. Publishing
-    // each tick would make publishIntervalMs meaningless, so only a real
-    // state/substate transition publishes immediately; the heartbeat carries
-    // the rest at the configured cadence.
-    if (transitioned) publishIfChanged();
-    else ensureHeartbeat();
+    // Telemetry (temperatures, pressure, flow) arrives ~5x/second and only
+    // updates the cache. A main state or substate change is a publish trigger;
+    // everything else waits for the timer.
+    if (transitioned) publish();
   }
 
   async function onShotStored(payload) {
@@ -172,15 +163,27 @@ export function createPlugin(host) {
           durationS = Math.max(0, (end - start) / 1000);
         }
       }
-      runtime.espressoCount += 1;
+      // The measurement series stops when flow stops, while coffee is still
+      // dripping into the cup, so its last sample undershoots the real yield.
+      // Decaid records the settled figure on the shot itself.
+      const actualYield = record.annotations?.actualYield;
+      const finalWeight = typeof actualYield === "number"
+        ? actualYield
+        : last?.scale?.weight ?? null;
+      if (typeof actualYield !== "number") {
+        log(`shot ${id} has no actualYield; falling back to the last scale sample`);
+      }
       runtime.shot = {
         active: false,
         id: record.id ?? id,
         startedAt: record.timestamp ?? null,
         durationS,
-        weightG: last?.scale?.weight ?? null,
+        weightG: finalWeight,
       };
-      publishIfChanged();
+      runtime.shotWeightG = finalWeight;
+      // End of shot is the one message that has to be exact, so refresh
+      // everything rather than reusing anything cached.
+      await publish({ full: true });
     } catch (e) {
       log(`shot record fetch failed: ${e?.message ?? e}`);
     }
@@ -195,7 +198,6 @@ export function createPlugin(host) {
     if (typeof title === "string" && title !== runtime.profile) {
       runtime.profile = title;
       runtime.profileFilename = await resolveProfileFilename(title);
-      publishIfChanged();
     }
   }
 
@@ -222,21 +224,31 @@ export function createPlugin(host) {
     }
   }
 
+  // These lists are paginated on newer Decaid builds ({items, total, ...}) and
+  // a plain array on older ones. Read the lifetime figure out of either, and
+  // say so when it is neither, rather than silently keeping a stale count.
+  function countFrom(payload, what) {
+    if (Array.isArray(payload)) return payload.length;
+    if (payload && typeof payload.total === "number") return payload.total;
+    log(`${what} count: unrecognised response shape, keeping the previous value`);
+    return null;
+  }
+
   async function refreshCounts() {
     try {
+      // limit=1 keeps the payload small; only the total is wanted.
       const [shotsRes, steamsRes] = await Promise.all([
-        fetch(`${LOCAL_API_BASE}/api/v1/shots`),
-        fetch(`${LOCAL_API_BASE}/api/v1/steams`),
+        fetch(`${LOCAL_API_BASE}/api/v1/shots?limit=1`),
+        fetch(`${LOCAL_API_BASE}/api/v1/steams?limit=1`),
       ]);
       if (shotsRes.ok) {
-        const shots = await shotsRes.json();
-        runtime.espressoCount = Array.isArray(shots) ? shots.length : runtime.espressoCount;
+        const n = countFrom(await shotsRes.json(), "espresso");
+        if (n !== null) runtime.espressoCount = n;
       }
       if (steamsRes.ok) {
-        const steams = await steamsRes.json();
-        runtime.steamingCount = Array.isArray(steams) ? steams.length : runtime.steamingCount;
+        const n = countFrom(await steamsRes.json(), "steaming");
+        if (n !== null) runtime.steamingCount = n;
       }
-      publishIfChanged();
     } catch (e) {
       log(`count refresh failed: ${e?.message ?? e}`);
     }
@@ -250,13 +262,11 @@ export function createPlugin(host) {
     bridge = createMqttBridge({
       host,
       config,
-      onCommand: createCommandHandler(dispatcher, log, () => pollWorkflow()),
+      onCommand: createCommandHandler(dispatcher, log, () => {}),
       log,
     });
     bridge.onConnectedHandler = () => {
-      publishNow();
-      refreshCounts();
-      pollWorkflow();
+      publish({ full: true });
     };
     bridge.start();
 
@@ -269,12 +279,10 @@ export function createPlugin(host) {
           if (runtime.shot?.active) {
             runtime.shot.weightG = data.weight;
           }
-          publishIfChanged();
         }
       },
       onStatus: (status) => {
         runtime.scaleConnected = status === "connected";
-        publishIfChanged();
       },
       log,
     });
@@ -286,7 +294,6 @@ export function createPlugin(host) {
       onJson: (data) => {
         if (typeof data.currentLevel !== "number") return;
         runtime.waterLevelMm = data.currentLevel;
-        ensureHeartbeat();
       },
       log,
     });
@@ -294,9 +301,9 @@ export function createPlugin(host) {
   }
 
   async function stopAll() {
-    if (heartbeatTimer) {
-      clearTimeout(heartbeatTimer);
-      heartbeatTimer = null;
+    if (publishTimer) {
+      clearTimeout(publishTimer);
+      publishTimer = null;
     }
     if (scaleStream) {
       await scaleStream.stop();

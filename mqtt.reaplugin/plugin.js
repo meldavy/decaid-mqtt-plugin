@@ -73,6 +73,7 @@ var __mqttBundle = (() => {
   var DEFAULT_PORT = 8883;
   var DEFAULT_PUBLISH_INTERVAL_MS = 6e4;
   var MIN_PUBLISH_INTERVAL_MS = 1e3;
+  var ACTIVE_SHOT_PUBLISH_INTERVAL_MS = 1e3;
   var UNIQUE_ID_KEY = "uniqueId";
   function generateUniqueId() {
     const n = Math.floor(Math.random() * 4294967295);
@@ -12512,7 +12513,7 @@ In order to be iterable, non-array objects must have a [Symbol.iterator]() metho
     let bridge = null;
     let scaleStream = null;
     let waterStream = null;
-    let heartbeatTimer = null;
+    let publishTimer = null;
     let dispatcher = null;
     const runtime = {
       snapshot: null,
@@ -12562,49 +12563,28 @@ In order to be iterable, non-array objects must have a [Symbol.iterator]() metho
         shot: runtime.shot ? currentShotFields() : null
       });
     }
-    function heartbeatIntervalMs(doc) {
-      return doc.shot_active ? 1e3 : config.publishIntervalMs;
-    }
-    function publishNow() {
+    async function publish({ full = false } = {}) {
+      if (!bridge) return;
+      await pollWorkflow();
+      if (full) await refreshCounts();
       if (!bridge) return;
       const doc = buildDoc();
-      const json = JSON.stringify(doc);
-      runtime.lastDocJson = json;
+      runtime.lastDocJson = JSON.stringify(doc);
       bridge.publishState(doc, (e) => {
         if (e) log(`state publish failed: ${e?.message ?? e}`);
       });
-      scheduleHeartbeat(doc);
+      armPublishTimer(doc);
     }
-    function publishIfChanged() {
-      if (!bridge) return;
-      const doc = buildDoc();
-      const json = JSON.stringify(doc);
-      if (json === runtime.lastDocJson) {
-        scheduleHeartbeat(doc);
-        return;
-      }
-      runtime.lastDocJson = json;
-      bridge.publishState(doc, (e) => {
-        if (e) log(`state publish failed: ${e?.message ?? e}`);
-      });
-      scheduleHeartbeat(doc);
-    }
-    function ensureHeartbeat() {
-      if (!bridge || heartbeatTimer) return;
-      scheduleHeartbeat(buildDoc());
-    }
-    function scheduleHeartbeat(doc) {
-      if (heartbeatTimer) {
-        clearTimeout(heartbeatTimer);
-        heartbeatTimer = null;
+    function armPublishTimer(doc) {
+      if (publishTimer) {
+        clearTimeout(publishTimer);
+        publishTimer = null;
       }
       if (!bridge) return;
-      const interval = heartbeatIntervalMs(doc);
-      heartbeatTimer = setTimeout(() => {
-        heartbeatTimer = null;
-        if (!bridge) return;
-        publishNow();
-        pollWorkflow();
+      const interval = doc.shot_active ? ACTIVE_SHOT_PUBLISH_INTERVAL_MS : config.publishIntervalMs;
+      publishTimer = setTimeout(() => {
+        publishTimer = null;
+        publish();
       }, interval);
     }
     function onStateUpdate(payload) {
@@ -12621,8 +12601,7 @@ In order to be iterable, non-array objects must have a [Symbol.iterator]() metho
       } else if (!active && runtime.shot?.active === true) {
         runtime.shot = { ...runtime.shot, active: false };
       }
-      if (transitioned) publishIfChanged();
-      else ensureHeartbeat();
+      if (transitioned) publish();
     }
     async function onShotStored(payload) {
       const id = payload?.id;
@@ -12645,15 +12624,20 @@ In order to be iterable, non-array objects must have a [Symbol.iterator]() metho
             durationS = Math.max(0, (end - start) / 1e3);
           }
         }
-        runtime.espressoCount += 1;
+        const actualYield = record.annotations?.actualYield;
+        const finalWeight = typeof actualYield === "number" ? actualYield : last?.scale?.weight ?? null;
+        if (typeof actualYield !== "number") {
+          log(`shot ${id} has no actualYield; falling back to the last scale sample`);
+        }
         runtime.shot = {
           active: false,
           id: record.id ?? id,
           startedAt: record.timestamp ?? null,
           durationS,
-          weightG: last?.scale?.weight ?? null
+          weightG: finalWeight
         };
-        publishIfChanged();
+        runtime.shotWeightG = finalWeight;
+        await publish({ full: true });
       } catch (e) {
         log(`shot record fetch failed: ${e?.message ?? e}`);
       }
@@ -12666,7 +12650,6 @@ In order to be iterable, non-array objects must have a [Symbol.iterator]() metho
       if (typeof title === "string" && title !== runtime.profile) {
         runtime.profile = title;
         runtime.profileFilename = await resolveProfileFilename(title);
-        publishIfChanged();
       }
     }
     async function pollWorkflow() {
@@ -12690,21 +12673,26 @@ In order to be iterable, non-array objects must have a [Symbol.iterator]() metho
         return "";
       }
     }
+    function countFrom(payload, what) {
+      if (Array.isArray(payload)) return payload.length;
+      if (payload && typeof payload.total === "number") return payload.total;
+      log(`${what} count: unrecognised response shape, keeping the previous value`);
+      return null;
+    }
     async function refreshCounts() {
       try {
         const [shotsRes, steamsRes] = await Promise.all([
-          fetch(`${LOCAL_API_BASE}/api/v1/shots`),
-          fetch(`${LOCAL_API_BASE}/api/v1/steams`)
+          fetch(`${LOCAL_API_BASE}/api/v1/shots?limit=1`),
+          fetch(`${LOCAL_API_BASE}/api/v1/steams?limit=1`)
         ]);
         if (shotsRes.ok) {
-          const shots = await shotsRes.json();
-          runtime.espressoCount = Array.isArray(shots) ? shots.length : runtime.espressoCount;
+          const n = countFrom(await shotsRes.json(), "espresso");
+          if (n !== null) runtime.espressoCount = n;
         }
         if (steamsRes.ok) {
-          const steams = await steamsRes.json();
-          runtime.steamingCount = Array.isArray(steams) ? steams.length : runtime.steamingCount;
+          const n = countFrom(await steamsRes.json(), "steaming");
+          if (n !== null) runtime.steamingCount = n;
         }
-        publishIfChanged();
       } catch (e) {
         log(`count refresh failed: ${e?.message ?? e}`);
       }
@@ -12717,13 +12705,12 @@ In order to be iterable, non-array objects must have a [Symbol.iterator]() metho
       bridge = createMqttBridge({
         host,
         config,
-        onCommand: createCommandHandler(dispatcher, log, () => pollWorkflow()),
+        onCommand: createCommandHandler(dispatcher, log, () => {
+        }),
         log
       });
       bridge.onConnectedHandler = () => {
-        publishNow();
-        refreshCounts();
-        pollWorkflow();
+        publish({ full: true });
       };
       bridge.start();
       scaleStream = createLoopbackJsonStream({
@@ -12735,12 +12722,10 @@ In order to be iterable, non-array objects must have a [Symbol.iterator]() metho
             if (runtime.shot?.active) {
               runtime.shot.weightG = data.weight;
             }
-            publishIfChanged();
           }
         },
         onStatus: (status) => {
           runtime.scaleConnected = status === "connected";
-          publishIfChanged();
         },
         log
       });
@@ -12751,16 +12736,15 @@ In order to be iterable, non-array objects must have a [Symbol.iterator]() metho
         onJson: (data) => {
           if (typeof data.currentLevel !== "number") return;
           runtime.waterLevelMm = data.currentLevel;
-          ensureHeartbeat();
         },
         log
       });
       waterStream.start();
     }
     async function stopAll() {
-      if (heartbeatTimer) {
-        clearTimeout(heartbeatTimer);
-        heartbeatTimer = null;
+      if (publishTimer) {
+        clearTimeout(publishTimer);
+        publishTimer = null;
       }
       if (scaleStream) {
         await scaleStream.stop();

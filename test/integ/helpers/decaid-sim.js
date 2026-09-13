@@ -97,7 +97,7 @@ export function createDecaidSim() {
       res.end(JSON.stringify(body));
     };
 
-    if (req.method === "GET" && url.pathname === "/api/v1/shots") return json(200, state.shots);
+    if (req.method === "GET" && url.pathname === "/api/v1/shots") return json(200, state.shotsList ?? state.shots);
     if (req.method === "GET" && url.pathname === "/api/v1/steams") return json(200, state.steams);
     if (req.method === "GET" && url.pathname === "/api/v1/profiles") return json(200, state.profiles);
     if (req.method === "GET" && url.pathname === "/api/v1/workflow") return json(200, state.workflow);

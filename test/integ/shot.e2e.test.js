@@ -49,6 +49,52 @@ test("shot lifecycle: activation cadence, live weight, completion record", async
   assert.equal(fetches.length, 1);
 });
 
+test("final shot message publishes the settled yield, not the last scale sample", async () => {
+  const { sim, broker, plugin } = env;
+  await waitFor(() => broker.publishes.some((p) => p.topic.endsWith("/state")));
+  plugin.event("stateUpdate", machineSnapshot());
+  await waitFor(() => latestStateDoc(broker)?.de1_connected === true);
+
+  // The measurement series stops at flow-stop while coffee is still dripping,
+  // so its last sample reads low. Decaid records the settled figure on the shot.
+  sim.state.shots = [shotRecord("shot-yield", { weight: 26.3, actualYield: 33.6 })];
+  plugin.event("shotStored", { id: "shot-yield" });
+
+  await waitFor(() => latestStateDoc(broker)?.shot_id === "shot-yield");
+  assert.equal(latestStateDoc(broker).shot_weight_g, 33.6);
+});
+
+test("final shot message falls back to the last sample when no yield was recorded", async () => {
+  const { sim, broker, plugin } = env;
+  await waitFor(() => broker.publishes.some((p) => p.topic.endsWith("/state")));
+  plugin.event("stateUpdate", machineSnapshot());
+  await waitFor(() => latestStateDoc(broker)?.de1_connected === true);
+
+  sim.state.shots = [shotRecord("shot-noyield", { weight: 21.4 })];
+  plugin.event("shotStored", { id: "shot-noyield" });
+
+  await waitFor(() => latestStateDoc(broker)?.shot_id === "shot-noyield");
+  assert.equal(latestStateDoc(broker).shot_weight_g, 21.4);
+  await plugin.waitForLog(/has no actualYield/);
+});
+
+test("espresso count reads the total from a paginated shots response", async () => {
+  const { sim, broker, plugin } = env;
+  await waitFor(() => broker.publishes.some((p) => p.topic.endsWith("/state")));
+  plugin.event("stateUpdate", machineSnapshot());
+  await waitFor(() => latestStateDoc(broker)?.de1_connected === true);
+
+  // Newer Decaid builds paginate this list, so the lifetime figure is `total`
+  // and the array length is just the page size.
+  sim.state.shotsList = { items: [{ id: "s1" }], total: 492, limit: 1, offset: 0 };
+  sim.state.steams = { items: [], total: 7, limit: 1, offset: 0 };
+  sim.state.shots = [shotRecord("s1")];
+  plugin.event("shotStored", { id: "s1" });
+
+  await waitFor(() => latestStateDoc(broker)?.espresso_count === 492);
+  assert.equal(latestStateDoc(broker).steaming_count, 7);
+});
+
 test("shotStored failure keeps the document publishable", async () => {
   const { sim, broker, plugin } = env;
   await waitFor(() => broker.publishes.some((p) => p.topic.endsWith("/state")));
