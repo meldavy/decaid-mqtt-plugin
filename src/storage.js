@@ -3,11 +3,11 @@ export function createStorageAdapter(host) {
 
   function read(key, timeoutMs = 2000) {
     return new Promise((resolve) => {
-      const pending = { key, resolve };
-      pendingReads.add(pending);
+      const pendingRead = { key, resolve };
+      pendingReads.add(pendingRead);
       host.storage({ type: "read", key });
       setTimeout(() => {
-        if (pendingReads.delete(pending)) {
+        if (pendingReads.delete(pendingRead)) {
           resolve(null);
         }
       }, timeoutMs);
@@ -18,19 +18,19 @@ export function createStorageAdapter(host) {
     host.storage({ type: "write", key, data });
   }
 
-  function settle(event) {
+  function resolvePendingRead(event) {
     if (event?.name !== "storageRead") return false;
     const key = event?.payload?.key;
-    let settled = false;
-    for (const pending of Array.from(pendingReads)) {
-      if (pending.key === key) {
-        pendingReads.delete(pending);
-        pending.resolve(event.payload?.value ?? null);
-        settled = true;
+    let resolved = false;
+    for (const pendingRead of Array.from(pendingReads)) {
+      if (pendingRead.key === key) {
+        pendingReads.delete(pendingRead);
+        pendingRead.resolve(event.payload?.value ?? null);
+        resolved = true;
       }
     }
-    return settled;
+    return resolved;
   }
 
-  return { read, write, settle };
+  return { read, write, resolvePendingRead };
 }

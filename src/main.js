@@ -4,24 +4,26 @@ import {
   UNIQUE_ID_KEY,
   ACTIVE_SHOT_PUBLISH_INTERVAL_MS,
 } from "./config.js";
-import { buildStateDocument } from "./state-doc.js";
+import { buildStateMessage } from "./state-doc.js";
 import { mapState, mapSubstate, isShotActive } from "./mapping.js";
 import { parseCommand } from "./commands.js";
 import { CommandDispatcher } from "./dispatcher.js";
 import { createCommandHandler } from "./command-handler.js";
 import { createMqttBridge } from "./bridge.js";
-import { createLoopbackJsonStream, LOCAL_API_BASE } from "./loopback.js";
+import { createLoopbackJsonStream } from "./loopback.js";
 import { createStorageAdapter } from "./storage.js";
+import { createDecaidApi } from "./decaid-api.js";
 
 export const PLUGIN_ID = "mqtt.reaplugin";
 
 export function createPlugin(host) {
-  const log = (msg) => {
+  const log = (message) => {
     try {
-      host.log(`[mqtt] ${msg}`);
+      host.log(`[mqtt] ${message}`);
     } catch {}
   };
   const storage = createStorageAdapter(host);
+  const api = createDecaidApi({ fetchImpl: fetch, log });
 
   let config = null;
   let bridge = null;
@@ -43,33 +45,48 @@ export function createPlugin(host) {
     steamDisabled: true,
     ecoSteamOn: false,
     shot: null,
-    lastDocJson: null,
+    lastPublishedStateJson: null,
     lastState: null,
     lastSubstate: null,
   };
 
-  function publishedState() {
-    if (!runtime.lastDocJson) return undefined;
+  function lastPublishedMachineState() {
+    if (!runtime.lastPublishedStateJson) return undefined;
     try {
-      return JSON.parse(runtime.lastDocJson).state;
+      return JSON.parse(runtime.lastPublishedStateJson).state;
     } catch {
       return undefined;
     }
   }
 
-  function currentShotFields() {
-    const active = runtime.shot?.active === true;
+  function shotFieldsForStateMessage() {
+    const shotActive = runtime.shot?.active === true;
     return {
-      active,
-      id: active ? null : runtime.shot?.id ?? null,
-      startedAt: active ? null : runtime.shot?.startedAt ?? null,
-      durationS: active ? null : runtime.shot?.durationS ?? null,
-      weightG: active ? runtime.shotWeightG : runtime.shot?.weightG ?? runtime.shotWeightG,
+      active: shotActive,
+      id: shotActive ? null : runtime.shot?.id ?? null,
+      startedAt: shotActive ? null : runtime.shot?.startedAt ?? null,
+      durationS: shotActive ? null : runtime.shot?.durationS ?? null,
+      weightG: shotActive ? runtime.shotWeightG : runtime.shot?.weightG ?? runtime.shotWeightG,
     };
   }
 
-  function buildDoc() {
-    return buildStateDocument({
+  // Single publish path. Every message that reaches the broker is built here,
+  // from a message that is refreshed first, so a publish never ships a field
+  // that some other code path forgot to update.
+  //
+  // It is reached from exactly three places: the periodic timer, a main
+  // state/substate change, and the end of a shot. Nothing else publishes.
+  //
+  // The workflow is re-read every time because the profile can be changed from
+  // the app at any moment and Decaid raises no event this plugin can see. The
+  // counts are not: they only move when a shot or steam is recorded, and the
+  // publishes that follow those ask for the counts to be refreshed first.
+  async function publish({ refreshCountsFirst = false } = {}) {
+    if (!bridge) return;
+    await pollWorkflow();
+    if (refreshCountsFirst) await refreshCounts();
+    if (!bridge) return;
+    const stateMessage = buildStateMessage({
       snapshot: runtime.snapshot,
       scaleConnected: runtime.scaleConnected,
       waterLevelMm: runtime.waterLevelMm,
@@ -79,41 +96,22 @@ export function createPlugin(host) {
       steamingCount: runtime.steamingCount,
       steamDisabled: runtime.steamDisabled,
       ecoSteamOn: runtime.ecoSteamOn,
-      shot: runtime.shot ? currentShotFields() : null,
+      shot: runtime.shot ? shotFieldsForStateMessage() : null,
     });
-  }
-
-  // Single publish path. Every message that reaches the broker is built here,
-  // from a document that is refreshed first, so a publish never ships a field
-  // that some other code path forgot to update.
-  //
-  // It is reached from exactly three places: the periodic timer, a main
-  // state/substate change, and the end of a shot. Nothing else publishes.
-  //
-  // The workflow is re-read every time because the profile can be changed from
-  // the app at any moment and Decaid raises no event this plugin can see. The
-  // counts are not: they only move when a shot or steam is recorded, and the
-  // publishes that follow those ask for `full`.
-  async function publish({ full = false } = {}) {
-    if (!bridge) return;
-    await pollWorkflow();
-    if (full) await refreshCounts();
-    if (!bridge) return;
-    const doc = buildDoc();
-    runtime.lastDocJson = JSON.stringify(doc);
-    bridge.publishState(doc, (e) => {
+    runtime.lastPublishedStateJson = JSON.stringify(stateMessage);
+    bridge.publishState(stateMessage, (e) => {
       if (e) log(`state publish failed: ${e?.message ?? e}`);
     });
-    armPublishTimer(doc);
+    armPublishTimer(stateMessage);
   }
 
-  function armPublishTimer(doc) {
+  function armPublishTimer(stateMessage) {
     if (publishTimer) {
       clearTimeout(publishTimer);
       publishTimer = null;
     }
     if (!bridge) return;
-    const interval = doc.shot_active
+    const interval = stateMessage.shot_active
       ? ACTIVE_SHOT_PUBLISH_INTERVAL_MS
       : config.publishIntervalMs;
     publishTimer = setTimeout(() => {
@@ -124,16 +122,18 @@ export function createPlugin(host) {
 
   function onStateUpdate(payload) {
     runtime.snapshot = payload;
-    const state = mapState(payload.state?.state ?? payload.state);
-    const substate = mapSubstate(payload.state?.substate ?? payload.substate) ?? "";
-    const active = isShotActive(state, substate);
+    const rawState = payload.state?.state ?? payload.state;
+    const rawSubstate = payload.state?.substate ?? payload.substate;
+    const state = mapState(rawState);
+    const substate = mapSubstate(rawSubstate) ?? "";
+    const shotActive = isShotActive(state, substate);
     const transitioned = state !== runtime.lastState || substate !== runtime.lastSubstate;
     runtime.lastState = state;
     runtime.lastSubstate = substate;
-    if (active && runtime.shot?.active !== true) {
+    if (shotActive && runtime.shot?.active !== true) {
       runtime.shot = { active: true };
       runtime.shotWeightG = null;
-    } else if (!active && runtime.shot?.active === true) {
+    } else if (!shotActive && runtime.shot?.active === true) {
       runtime.shot = { ...runtime.shot, active: false };
     }
     // Telemetry (temperatures, pressure, flow) arrives ~5x/second and only
@@ -143,24 +143,20 @@ export function createPlugin(host) {
   }
 
   async function onShotStored(payload) {
-    const id = payload?.id;
-    if (!id) return;
+    const shotId = payload?.id;
+    if (!shotId) return;
     try {
-      const res = await fetch(`${LOCAL_API_BASE}/api/v1/shots/${id}`);
-      if (!res.ok) {
-        log(`shot fetch failed: ${res.status}`);
-        return;
-      }
-      const record = await res.json();
+      const record = await api.fetchShotRecord(shotId);
+      if (!record) return;
       const measurements = Array.isArray(record.measurements) ? record.measurements : [];
-      const first = measurements[0];
-      const last = measurements[measurements.length - 1];
+      const firstSample = measurements[0];
+      const lastSample = measurements[measurements.length - 1];
       let durationS = null;
-      if (first && last) {
-        const start = new Date(first.machine?.timestamp).getTime();
-        const end = new Date(last.machine?.timestamp).getTime();
-        if (Number.isFinite(start) && Number.isFinite(end)) {
-          durationS = Math.max(0, (end - start) / 1000);
+      if (firstSample && lastSample) {
+        const startMs = new Date(firstSample.machine?.timestamp).getTime();
+        const endMs = new Date(lastSample.machine?.timestamp).getTime();
+        if (Number.isFinite(startMs) && Number.isFinite(endMs)) {
+          durationS = Math.max(0, (endMs - startMs) / 1000);
         }
       }
       // The measurement series stops when flow stops, while coffee is still
@@ -169,13 +165,13 @@ export function createPlugin(host) {
       const actualYield = record.annotations?.actualYield;
       const finalWeight = typeof actualYield === "number"
         ? actualYield
-        : last?.scale?.weight ?? null;
+        : lastSample?.scale?.weight ?? null;
       if (typeof actualYield !== "number") {
-        log(`shot ${id} has no actualYield; falling back to the last scale sample`);
+        log(`shot ${shotId} has no actualYield; falling back to the last scale sample`);
       }
       runtime.shot = {
         active: false,
-        id: record.id ?? id,
+        id: record.id ?? shotId,
         startedAt: record.timestamp ?? null,
         durationS,
         weightG: finalWeight,
@@ -183,9 +179,9 @@ export function createPlugin(host) {
       runtime.shotWeightG = finalWeight;
       // End of shot is the one message that has to be exact, so refresh
       // everything rather than reusing anything cached.
-      await publish({ full: true });
+      await publish({ refreshCountsFirst: true });
     } catch (e) {
-      log(`shot record fetch failed: ${e?.message ?? e}`);
+      log(`shot ${shotId} processing failed: ${e?.message ?? e}`);
     }
   }
 
@@ -197,87 +193,56 @@ export function createPlugin(host) {
     const title = payload?.profile?.title;
     if (typeof title === "string" && title !== runtime.profile) {
       runtime.profile = title;
-      runtime.profileFilename = await resolveProfileFilename(title);
+      runtime.profileFilename = await findProfileIdByTitle(title);
     }
   }
 
   async function pollWorkflow() {
-    try {
-      const res = await fetch(`${LOCAL_API_BASE}/api/v1/workflow`);
-      if (!res.ok) return;
-      await applyWorkflowPayload(await res.json());
-    } catch (e) {
-      log(`workflow poll failed: ${e?.message ?? e}`);
-    }
+    const workflow = await api.fetchWorkflow();
+    if (workflow) await applyWorkflowPayload(workflow);
   }
 
-  async function resolveProfileFilename(title) {
-    try {
-      const res = await fetch(`${LOCAL_API_BASE}/api/v1/profiles`);
-      if (!res.ok) return "";
-      const records = await res.json();
-      if (!Array.isArray(records)) return "";
-      const match = records.find((r) => r.profile?.title === title);
-      return match?.id ?? "";
-    } catch {
-      return "";
-    }
-  }
-
-  // These lists are paginated on newer Decaid builds ({items, total, ...}) and
-  // a plain array on older ones. Read the lifetime figure out of either, and
-  // say so when it is neither, rather than silently keeping a stale count.
-  function countFrom(payload, what) {
-    if (Array.isArray(payload)) return payload.length;
-    if (payload && typeof payload.total === "number") return payload.total;
-    log(`${what} count: unrecognised response shape, keeping the previous value`);
-    return null;
+  async function findProfileIdByTitle(title) {
+    const records = await api.fetchProfiles();
+    if (!Array.isArray(records)) return "";
+    const match = records.find((record) => record.profile?.title === title);
+    return match?.id ?? "";
   }
 
   async function refreshCounts() {
-    try {
-      // limit=1 keeps the payload small; only the total is wanted.
-      const [shotsRes, steamsRes] = await Promise.all([
-        fetch(`${LOCAL_API_BASE}/api/v1/shots?limit=1`),
-        fetch(`${LOCAL_API_BASE}/api/v1/steams?limit=1`),
-      ]);
-      if (shotsRes.ok) {
-        const n = countFrom(await shotsRes.json(), "espresso");
-        if (n !== null) runtime.espressoCount = n;
-      }
-      if (steamsRes.ok) {
-        const n = countFrom(await steamsRes.json(), "steaming");
-        if (n !== null) runtime.steamingCount = n;
-      }
-    } catch (e) {
-      log(`count refresh failed: ${e?.message ?? e}`);
-    }
+    // limit=1 keeps the payload small; only the total is wanted.
+    const [espressoCount, steamingCount] = await Promise.all([
+      api.fetchCollectionCount("/api/v1/shots?limit=1", "espresso"),
+      api.fetchCollectionCount("/api/v1/steams?limit=1", "steaming"),
+    ]);
+    if (espressoCount !== null) runtime.espressoCount = espressoCount;
+    if (steamingCount !== null) runtime.steamingCount = steamingCount;
   }
 
-  function startAll() {
+  function buildAndStartServices() {
     dispatcher = new CommandDispatcher({
       fetchImpl: fetch,
-      currentStateProvider: publishedState,
+      currentStateProvider: lastPublishedMachineState,
     });
     bridge = createMqttBridge({
       host,
       config,
-      onCommand: createCommandHandler(dispatcher, log, () => {}),
+      onCommand: createCommandHandler(dispatcher, log),
       log,
     });
     bridge.onConnectedHandler = () => {
-      publish({ full: true });
+      publish({ refreshCountsFirst: true });
     };
     bridge.start();
 
     scaleStream = createLoopbackJsonStream({
       host,
       path: "/ws/v1/scale/snapshot",
-      onJson: (data) => {
-        if (typeof data.weight === "number") {
-          runtime.shotWeightG = data.weight;
+      onJson: (snapshot) => {
+        if (typeof snapshot.weight === "number") {
+          runtime.shotWeightG = snapshot.weight;
           if (runtime.shot?.active) {
-            runtime.shot.weightG = data.weight;
+            runtime.shot.weightG = snapshot.weight;
           }
         }
       },
@@ -291,9 +256,9 @@ export function createPlugin(host) {
     waterStream = createLoopbackJsonStream({
       host,
       path: "/ws/v1/machine/waterLevels",
-      onJson: (data) => {
-        if (typeof data.currentLevel !== "number") return;
-        runtime.waterLevelMm = data.currentLevel;
+      onJson: (waterLevelReading) => {
+        if (typeof waterLevelReading.currentLevel !== "number") return;
+        runtime.waterLevelMm = waterLevelReading.currentLevel;
       },
       log,
     });
@@ -318,7 +283,7 @@ export function createPlugin(host) {
       bridge = null;
     }
     dispatcher = null;
-    runtime.lastDocJson = null;
+    runtime.lastPublishedStateJson = null;
   }
 
   return {
@@ -326,19 +291,19 @@ export function createPlugin(host) {
 
     async onLoad(settings) {
       const storedUniqueId = await storage.read(UNIQUE_ID_KEY);
-      const { config: normalized, uniqueId, errors } = normalizeConfig(settings, storedUniqueId);
+      const { config: normalized, uniqueId, warnings } = normalizeConfig(settings, storedUniqueId);
       if (!storedUniqueId) {
         storage.write(UNIQUE_ID_KEY, uniqueId);
       }
-      for (const err of errors) {
-        log(`config warning: ${err}`);
+      for (const warning of warnings) {
+        log(`config warning: ${warning}`);
       }
       config = normalized;
       if (!config.enabled) {
         log("disabled: no broker host configured");
         return;
       }
-      startAll();
+      buildAndStartServices();
     },
 
     async onUnload() {
@@ -346,7 +311,7 @@ export function createPlugin(host) {
     },
 
     onEvent(event) {
-      if (storage.settle(event)) return;
+      if (storage.resolvePendingRead(event)) return;
       switch (event?.name) {
         case "stateUpdate":
           onStateUpdate(event.payload);

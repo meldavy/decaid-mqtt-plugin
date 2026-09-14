@@ -1,4 +1,4 @@
-const API_BASE = "http://localhost:8080";
+import { DECAID_API_BASE } from "./decaid-api.js";
 
 export class CommandDispatcher {
   constructor({ fetchImpl, currentStateProvider }) {
@@ -27,10 +27,10 @@ export class CommandDispatcher {
   }
 
   async _putState(stateName) {
-    const res = await this._fetch(`${API_BASE}/api/v1/machine/state/${stateName}`, {
+    const response = await this._fetch(`${DECAID_API_BASE}/api/v1/machine/state/${stateName}`, {
       method: "PUT",
     });
-    return { ok: res.ok, status: res.status };
+    return { ok: response.ok, status: response.status };
   }
 
   async _sleep() {
@@ -65,21 +65,21 @@ export class CommandDispatcher {
   }
 
   async _findProfile(predicate) {
-    const res = await this._fetch(`${API_BASE}/api/v1/profiles`);
-    if (!res.ok) {
+    const response = await this._fetch(`${DECAID_API_BASE}/api/v1/profiles`);
+    if (!response.ok) {
       return null;
     }
-    const records = await res.json();
+    const records = await response.json();
     if (!Array.isArray(records)) return null;
     return records.find(predicate) ?? null;
   }
 
   async _selectProfile(record) {
-    const res = await this._fetch(`${API_BASE}/api/v1/machine/profile`, {
+    const response = await this._fetch(`${DECAID_API_BASE}/api/v1/machine/profile`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(record.profile),
     });
-    return { ok: res.ok, status: res.status };
+    return { ok: response.ok, status: response.status };
   }
 }

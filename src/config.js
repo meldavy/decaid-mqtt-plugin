@@ -5,12 +5,12 @@ export const ACTIVE_SHOT_PUBLISH_INTERVAL_MS = 1000;
 export const UNIQUE_ID_KEY = "uniqueId";
 
 export function generateUniqueId() {
-  const n = Math.floor(Math.random() * 0xffffffff);
-  return n.toString(16).padStart(8, "0");
+  const randomValue = Math.floor(Math.random() * 0xffffffff);
+  return randomValue.toString(16).padStart(8, "0");
 }
 
 export function normalizeConfig(raw, storedUniqueId) {
-  const errors = [];
+  const warnings = [];
   const uniqueId = storedUniqueId || generateUniqueId();
 
   const host = typeof raw.Host === "string" ? raw.Host.trim() : "";
@@ -18,7 +18,7 @@ export function normalizeConfig(raw, storedUniqueId) {
   if (port === undefined || port === null || port === "") port = DEFAULT_PORT;
   port = Number(port);
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
-    errors.push(`port must be an integer in 1-65535, got ${raw.Port}`);
+    warnings.push(`port must be an integer in 1-65535, got ${raw.Port}`);
     port = DEFAULT_PORT;
   }
 
@@ -28,7 +28,7 @@ export function normalizeConfig(raw, storedUniqueId) {
   }
   publishIntervalMs = Number(publishIntervalMs);
   if (!Number.isFinite(publishIntervalMs) || publishIntervalMs < MIN_PUBLISH_INTERVAL_MS) {
-    errors.push(`publishIntervalMs must be >= ${MIN_PUBLISH_INTERVAL_MS}, got ${raw.PublishIntervalMs}`);
+    warnings.push(`publishIntervalMs must be >= ${MIN_PUBLISH_INTERVAL_MS}, got ${raw.PublishIntervalMs}`);
     publishIntervalMs = DEFAULT_PUBLISH_INTERVAL_MS;
   }
 
@@ -45,7 +45,7 @@ export function normalizeConfig(raw, storedUniqueId) {
     : `de1plus/${uniqueId}`;
 
   return {
-    errors,
+    warnings,
     uniqueId,
     config: {
       enabled: host !== "",

@@ -24,11 +24,11 @@ const BASE_FIELDS = [
   "steam_state",
 ];
 
-export function offlineDocument() {
+export function offlineStateMessage() {
   return { online: false, de1_connected: false };
 }
 
-export function buildStateDocument(input) {
+export function buildStateMessage(input) {
   const {
     snapshot,
     scaleConnected = false,
@@ -42,13 +42,13 @@ export function buildStateDocument(input) {
     shot = null,
   } = input;
 
-  if (!snapshot) return offlineDocument();
+  if (!snapshot) return offlineStateMessage();
 
   const state = mapState(snapshot.state?.state ?? snapshot.state);
   const substate = mapSubstate(snapshot.state?.substate ?? snapshot.substate);
   const steam = deriveSteamFields(state, steamDisabled, ecoSteamOn);
 
-  const doc = {
+  const stateMessage = {
     online: true,
     de1_connected: true,
     scale_connected: Boolean(scaleConnected),
@@ -68,13 +68,13 @@ export function buildStateDocument(input) {
     steam_state: steam.steam_state,
   };
 
-  doc.shot_active = shot ? Boolean(shot.active) : false;
-  if (shot?.id !== undefined && shot?.id !== null) doc.shot_id = shot.id;
-  if (shot?.startedAt !== undefined && shot?.startedAt !== null) doc.shot_started_at = shot.startedAt;
-  if (shot?.durationS !== undefined && shot?.durationS !== null) doc.shot_duration_s = shot.durationS;
-  if (shot?.weightG !== undefined && shot?.weightG !== null) doc.shot_weight_g = shot.weightG;
+  stateMessage.shot_active = shot ? Boolean(shot.active) : false;
+  if (shot?.id !== undefined && shot?.id !== null) stateMessage.shot_id = shot.id;
+  if (shot?.startedAt !== undefined && shot?.startedAt !== null) stateMessage.shot_started_at = shot.startedAt;
+  if (shot?.durationS !== undefined && shot?.durationS !== null) stateMessage.shot_duration_s = shot.durationS;
+  if (shot?.weightG !== undefined && shot?.weightG !== null) stateMessage.shot_weight_g = shot.weightG;
 
-  return doc;
+  return stateMessage;
 }
 
 export function mmToMl(mm) {

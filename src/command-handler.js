@@ -1,6 +1,6 @@
 import { parseCommand } from "./commands.js";
 
-export function createCommandHandler(dispatcher, log, onProfileCommand) {
+export function createCommandHandler(dispatcher, log, onProfileCommand = null) {
   return function handleCommandMessage(topic, payload) {
     const parsed = parseCommand(String(payload));
     if (!parsed) {

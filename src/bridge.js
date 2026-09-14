@@ -1,6 +1,6 @@
 import mqtt from "mqtt";
 import { HostTransportStream } from "./host-transport-stream.js";
-import { offlineDocument } from "./state-doc.js";
+import { offlineStateMessage } from "./state-doc.js";
 
 export const MAX_RECONNECT_ATTEMPTS = 15;
 export const BASE_RECONNECT_DELAY_MS = 2000;
@@ -60,7 +60,7 @@ export function createMqttBridge({ host, config, onCommand, log }) {
       protocolVersion,
       will: {
         topic: stateTopic,
-        payload: JSON.stringify(offlineDocument()),
+        payload: JSON.stringify(offlineStateMessage()),
         qos: 1,
         retain: true,
       },
@@ -106,7 +106,7 @@ export function createMqttBridge({ host, config, onCommand, log }) {
       const dead = client;
       client = null;
       if (dead.connected) {
-        dead.publish(stateTopic, JSON.stringify(offlineDocument()), { qos: 1, retain: true }, () => {
+        dead.publish(stateTopic, JSON.stringify(offlineStateMessage()), { qos: 1, retain: true }, () => {
           killClient(dead);
         });
       } else {
@@ -121,9 +121,9 @@ export function createMqttBridge({ host, config, onCommand, log }) {
     attempts = 0;
   }
 
-  function publishState(doc, cb) {
+  function publishState(stateMessage, onPublished) {
     if (!client) return false;
-    client.publish(stateTopic, JSON.stringify(doc), { qos: 1, retain: true }, cb);
+    client.publish(stateTopic, JSON.stringify(stateMessage), { qos: 1, retain: true }, onPublished);
     return true;
   }
 

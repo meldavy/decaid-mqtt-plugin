@@ -76,18 +76,18 @@ var __mqttBundle = (() => {
   var ACTIVE_SHOT_PUBLISH_INTERVAL_MS = 1e3;
   var UNIQUE_ID_KEY = "uniqueId";
   function generateUniqueId() {
-    const n = Math.floor(Math.random() * 4294967295);
-    return n.toString(16).padStart(8, "0");
+    const randomValue = Math.floor(Math.random() * 4294967295);
+    return randomValue.toString(16).padStart(8, "0");
   }
   function normalizeConfig(raw, storedUniqueId) {
-    const errors = [];
+    const warnings = [];
     const uniqueId = storedUniqueId || generateUniqueId();
     const host = typeof raw.Host === "string" ? raw.Host.trim() : "";
     let port = raw.Port;
     if (port === void 0 || port === null || port === "") port = DEFAULT_PORT;
     port = Number(port);
     if (!Number.isInteger(port) || port < 1 || port > 65535) {
-      errors.push(`port must be an integer in 1-65535, got ${raw.Port}`);
+      warnings.push(`port must be an integer in 1-65535, got ${raw.Port}`);
       port = DEFAULT_PORT;
     }
     let publishIntervalMs = raw.PublishIntervalMs;
@@ -96,14 +96,14 @@ var __mqttBundle = (() => {
     }
     publishIntervalMs = Number(publishIntervalMs);
     if (!Number.isFinite(publishIntervalMs) || publishIntervalMs < MIN_PUBLISH_INTERVAL_MS) {
-      errors.push(`publishIntervalMs must be >= ${MIN_PUBLISH_INTERVAL_MS}, got ${raw.PublishIntervalMs}`);
+      warnings.push(`publishIntervalMs must be >= ${MIN_PUBLISH_INTERVAL_MS}, got ${raw.PublishIntervalMs}`);
       publishIntervalMs = DEFAULT_PUBLISH_INTERVAL_MS;
     }
     const enableTls = raw.EnableTls === void 0 || raw.EnableTls === null ? true : Boolean(raw.EnableTls);
     const clientId = typeof raw.ClientId === "string" && raw.ClientId.trim() !== "" ? raw.ClientId.trim() : `de1plus_${uniqueId}`;
     const topicPrefix = typeof raw.TopicPrefix === "string" && raw.TopicPrefix.trim() !== "" ? raw.TopicPrefix.trim() : `de1plus/${uniqueId}`;
     return {
-      errors,
+      warnings,
       uniqueId,
       config: {
         enabled: host !== "",
@@ -194,15 +194,14 @@ var __mqttBundle = (() => {
     return { steam_mode: "On", steam_state: true };
   }
   function isShotActive(publishedState, substate) {
-    if (publishedState === "Espresso") return true;
-    return substate === "preinfusion" || substate === "pouring";
+    return publishedState === "Espresso";
   }
 
   // src/state-doc.js
-  function offlineDocument() {
+  function offlineStateMessage() {
     return { online: false, de1_connected: false };
   }
-  function buildStateDocument(input) {
+  function buildStateMessage(input) {
     const {
       snapshot,
       scaleConnected = false,
@@ -215,11 +214,11 @@ var __mqttBundle = (() => {
       ecoSteamOn = false,
       shot = null
     } = input;
-    if (!snapshot) return offlineDocument();
+    if (!snapshot) return offlineStateMessage();
     const state = mapState(snapshot.state?.state ?? snapshot.state);
     const substate = mapSubstate(snapshot.state?.substate ?? snapshot.substate);
     const steam = deriveSteamFields(state, steamDisabled, ecoSteamOn);
-    const doc = {
+    const stateMessage = {
       online: true,
       de1_connected: true,
       scale_connected: Boolean(scaleConnected),
@@ -238,12 +237,12 @@ var __mqttBundle = (() => {
       steam_mode: steam.steam_mode,
       steam_state: steam.steam_state
     };
-    doc.shot_active = shot ? Boolean(shot.active) : false;
-    if (shot?.id !== void 0 && shot?.id !== null) doc.shot_id = shot.id;
-    if (shot?.startedAt !== void 0 && shot?.startedAt !== null) doc.shot_started_at = shot.startedAt;
-    if (shot?.durationS !== void 0 && shot?.durationS !== null) doc.shot_duration_s = shot.durationS;
-    if (shot?.weightG !== void 0 && shot?.weightG !== null) doc.shot_weight_g = shot.weightG;
-    return doc;
+    stateMessage.shot_active = shot ? Boolean(shot.active) : false;
+    if (shot?.id !== void 0 && shot?.id !== null) stateMessage.shot_id = shot.id;
+    if (shot?.startedAt !== void 0 && shot?.startedAt !== null) stateMessage.shot_started_at = shot.startedAt;
+    if (shot?.durationS !== void 0 && shot?.durationS !== null) stateMessage.shot_duration_s = shot.durationS;
+    if (shot?.weightG !== void 0 && shot?.weightG !== null) stateMessage.shot_weight_g = shot.weightG;
+    return stateMessage;
   }
   function mmToMl(mm) {
     if (mm === null || mm === void 0 || !Number.isFinite(mm)) return 0;
@@ -332,27 +331,64 @@ var __mqttBundle = (() => {
   var EXACT_COMMANDS = /* @__PURE__ */ new Set(["wake", "sleep", "steam_on", "steam_off"]);
   function parseCommand(text) {
     if (typeof text !== "string") return null;
-    const data = text.trim();
-    if (data === "") return null;
-    if (EXACT_COMMANDS.has(data)) {
-      return { kind: data, argument: null };
+    const trimmed = text.trim();
+    if (trimmed === "") return null;
+    if (EXACT_COMMANDS.has(trimmed)) {
+      return { kind: trimmed, argument: null };
     }
-    const untrimmed = text;
-    if (untrimmed.startsWith("profile_filename ")) {
-      const argument = untrimmed.slice("profile_filename ".length);
+    if (text.startsWith("profile_filename ")) {
+      const argument = text.slice("profile_filename ".length);
       if (argument.trim() === "") return null;
       return { kind: "profile_filename", argument };
     }
-    if (untrimmed.startsWith("profile ")) {
-      const argument = untrimmed.slice("profile ".length);
+    if (text.startsWith("profile ")) {
+      const argument = text.slice("profile ".length);
       if (argument.trim() === "") return null;
       return { kind: "profile", argument };
     }
     return null;
   }
 
+  // src/decaid-api.js
+  var DECAID_API_BASE = "http://localhost:8080";
+  function createDecaidApi({ fetchImpl, log }) {
+    async function getJson(path, { quiet = false } = {}) {
+      try {
+        const response = await fetchImpl(`${DECAID_API_BASE}${path}`);
+        if (!response.ok) {
+          if (!quiet) log(`GET ${path} failed: ${response.status}`);
+          return null;
+        }
+        return await response.json();
+      } catch (e) {
+        if (!quiet) log(`GET ${path} failed: ${e?.message ?? e}`);
+        return null;
+      }
+    }
+    async function fetchShotRecord(shotId) {
+      return getJson(`/api/v1/shots/${shotId}`);
+    }
+    async function fetchWorkflow() {
+      return getJson("/api/v1/workflow", { quiet: true });
+    }
+    async function fetchProfiles() {
+      return getJson("/api/v1/profiles", { quiet: true });
+    }
+    function readCountFromResponse(payload, countKind) {
+      if (Array.isArray(payload)) return payload.length;
+      if (payload && typeof payload.total === "number") return payload.total;
+      log(`${countKind} count: unrecognised response shape, keeping the previous value`);
+      return null;
+    }
+    async function fetchCollectionCount(path, countKind) {
+      const payload = await getJson(path, { quiet: true });
+      if (!payload) return null;
+      return readCountFromResponse(payload, countKind);
+    }
+    return { fetchShotRecord, fetchWorkflow, fetchProfiles, fetchCollectionCount };
+  }
+
   // src/dispatcher.js
-  var API_BASE = "http://localhost:8080";
   var CommandDispatcher = class {
     constructor({ fetchImpl, currentStateProvider }) {
       this._fetch = fetchImpl;
@@ -378,10 +414,10 @@ var __mqttBundle = (() => {
       }
     }
     async _putState(stateName) {
-      const res = await this._fetch(`${API_BASE}/api/v1/machine/state/${stateName}`, {
+      const response = await this._fetch(`${DECAID_API_BASE}/api/v1/machine/state/${stateName}`, {
         method: "PUT"
       });
-      return { ok: res.ok, status: res.status };
+      return { ok: response.ok, status: response.status };
     }
     async _sleep() {
       const current = this._currentStateProvider();
@@ -411,26 +447,26 @@ var __mqttBundle = (() => {
       return this._selectProfile(record);
     }
     async _findProfile(predicate) {
-      const res = await this._fetch(`${API_BASE}/api/v1/profiles`);
-      if (!res.ok) {
+      const response = await this._fetch(`${DECAID_API_BASE}/api/v1/profiles`);
+      if (!response.ok) {
         return null;
       }
-      const records = await res.json();
+      const records = await response.json();
       if (!Array.isArray(records)) return null;
       return records.find(predicate) ?? null;
     }
     async _selectProfile(record) {
-      const res = await this._fetch(`${API_BASE}/api/v1/machine/profile`, {
+      const response = await this._fetch(`${DECAID_API_BASE}/api/v1/machine/profile`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(record.profile)
       });
-      return { ok: res.ok, status: res.status };
+      return { ok: response.ok, status: response.status };
     }
   };
 
   // src/command-handler.js
-  function createCommandHandler(dispatcher, log, onProfileCommand) {
+  function createCommandHandler(dispatcher, log, onProfileCommand = null) {
     return function handleCommandMessage(topic, payload) {
       const parsed = parseCommand(String(payload));
       if (!parsed) {
@@ -12289,7 +12325,7 @@ In order to be iterable, non-array objects must have a [Symbol.iterator]() metho
         protocolVersion,
         will: {
           topic: stateTopic,
-          payload: JSON.stringify(offlineDocument()),
+          payload: JSON.stringify(offlineStateMessage()),
           qos: 1,
           retain: true
         }
@@ -12334,7 +12370,7 @@ In order to be iterable, non-array objects must have a [Symbol.iterator]() metho
         const dead = client;
         client = null;
         if (dead.connected) {
-          dead.publish(stateTopic, JSON.stringify(offlineDocument()), { qos: 1, retain: true }, () => {
+          dead.publish(stateTopic, JSON.stringify(offlineStateMessage()), { qos: 1, retain: true }, () => {
             killClient(dead);
           });
         } else {
@@ -12347,9 +12383,9 @@ In order to be iterable, non-array objects must have a [Symbol.iterator]() metho
       disposed = false;
       attempts = 0;
     }
-    function publishState(doc, cb2) {
+    function publishState(stateMessage, onPublished) {
       if (!client) return false;
-      client.publish(stateTopic, JSON.stringify(doc), { qos: 1, retain: true }, cb2);
+      client.publish(stateTopic, JSON.stringify(stateMessage), { qos: 1, retain: true }, onPublished);
       return true;
     }
     return {
@@ -12371,7 +12407,6 @@ In order to be iterable, non-array objects must have a [Symbol.iterator]() metho
   }
 
   // src/loopback.js
-  var LOCAL_API_BASE = "http://localhost:8080";
   var LOCAL_WS_BASE = "ws://localhost:8080";
   function createLoopbackJsonStream({ host, path, onJson, onStatus, log }) {
     const url = `${LOCAL_WS_BASE}${path}`;
@@ -12392,17 +12427,17 @@ In order to be iterable, non-array objects must have a [Symbol.iterator]() metho
     async function connect() {
       if (stopped || handle !== null) return;
       try {
-        const opened = await host.transport.open({
+        const openResult = await host.transport.open({
           kind: "websocket",
           url
         });
         if (stopped) {
-          host.transport.close(opened.handle);
+          host.transport.close(openResult.handle);
           return;
         }
-        handle = opened.handle;
+        handle = openResult.handle;
         backoffMs = 2e3;
-        host.transport.onEvent(opened.handle, (event) => {
+        host.transport.onEvent(openResult.handle, (event) => {
           switch (event.type) {
             case "data": {
               if (event.dataType !== "text") return;
@@ -12459,7 +12494,7 @@ In order to be iterable, non-array objects must have a [Symbol.iterator]() metho
     return {
       start,
       stop,
-      get healthy() {
+      get connected() {
         return connected;
       }
     };
@@ -12470,11 +12505,11 @@ In order to be iterable, non-array objects must have a [Symbol.iterator]() metho
     const pendingReads = /* @__PURE__ */ new Set();
     function read(key, timeoutMs = 2e3) {
       return new Promise((resolve) => {
-        const pending = { key, resolve };
-        pendingReads.add(pending);
+        const pendingRead = { key, resolve };
+        pendingReads.add(pendingRead);
         host.storage({ type: "read", key });
         setTimeout(() => {
-          if (pendingReads.delete(pending)) {
+          if (pendingReads.delete(pendingRead)) {
             resolve(null);
           }
         }, timeoutMs);
@@ -12483,32 +12518,33 @@ In order to be iterable, non-array objects must have a [Symbol.iterator]() metho
     function write(key, data) {
       host.storage({ type: "write", key, data });
     }
-    function settle(event) {
+    function resolvePendingRead(event) {
       if (event?.name !== "storageRead") return false;
       const key = event?.payload?.key;
-      let settled = false;
-      for (const pending of Array.from(pendingReads)) {
-        if (pending.key === key) {
-          pendingReads.delete(pending);
-          pending.resolve(event.payload?.value ?? null);
-          settled = true;
+      let resolved = false;
+      for (const pendingRead of Array.from(pendingReads)) {
+        if (pendingRead.key === key) {
+          pendingReads.delete(pendingRead);
+          pendingRead.resolve(event.payload?.value ?? null);
+          resolved = true;
         }
       }
-      return settled;
+      return resolved;
     }
-    return { read, write, settle };
+    return { read, write, resolvePendingRead };
   }
 
   // src/main.js
   var PLUGIN_ID = "mqtt.reaplugin";
   function createPlugin(host) {
-    const log = (msg) => {
+    const log = (message) => {
       try {
-        host.log(`[mqtt] ${msg}`);
+        host.log(`[mqtt] ${message}`);
       } catch {
       }
     };
     const storage = createStorageAdapter(host);
+    const api = createDecaidApi({ fetchImpl: fetch, log });
     let config = null;
     let bridge = null;
     let scaleStream = null;
@@ -12527,30 +12563,34 @@ In order to be iterable, non-array objects must have a [Symbol.iterator]() metho
       steamDisabled: true,
       ecoSteamOn: false,
       shot: null,
-      lastDocJson: null,
+      lastPublishedStateJson: null,
       lastState: null,
       lastSubstate: null
     };
-    function publishedState() {
-      if (!runtime.lastDocJson) return void 0;
+    function lastPublishedMachineState() {
+      if (!runtime.lastPublishedStateJson) return void 0;
       try {
-        return JSON.parse(runtime.lastDocJson).state;
+        return JSON.parse(runtime.lastPublishedStateJson).state;
       } catch {
         return void 0;
       }
     }
-    function currentShotFields() {
-      const active = runtime.shot?.active === true;
+    function shotFieldsForStateMessage() {
+      const shotActive = runtime.shot?.active === true;
       return {
-        active,
-        id: active ? null : runtime.shot?.id ?? null,
-        startedAt: active ? null : runtime.shot?.startedAt ?? null,
-        durationS: active ? null : runtime.shot?.durationS ?? null,
-        weightG: active ? runtime.shotWeightG : runtime.shot?.weightG ?? runtime.shotWeightG
+        active: shotActive,
+        id: shotActive ? null : runtime.shot?.id ?? null,
+        startedAt: shotActive ? null : runtime.shot?.startedAt ?? null,
+        durationS: shotActive ? null : runtime.shot?.durationS ?? null,
+        weightG: shotActive ? runtime.shotWeightG : runtime.shot?.weightG ?? runtime.shotWeightG
       };
     }
-    function buildDoc() {
-      return buildStateDocument({
+    async function publish({ refreshCountsFirst = false } = {}) {
+      if (!bridge) return;
+      await pollWorkflow();
+      if (refreshCountsFirst) await refreshCounts();
+      if (!bridge) return;
+      const stateMessage = buildStateMessage({
         snapshot: runtime.snapshot,
         scaleConnected: runtime.scaleConnected,
         waterLevelMm: runtime.waterLevelMm,
@@ -12560,28 +12600,21 @@ In order to be iterable, non-array objects must have a [Symbol.iterator]() metho
         steamingCount: runtime.steamingCount,
         steamDisabled: runtime.steamDisabled,
         ecoSteamOn: runtime.ecoSteamOn,
-        shot: runtime.shot ? currentShotFields() : null
+        shot: runtime.shot ? shotFieldsForStateMessage() : null
       });
-    }
-    async function publish({ full = false } = {}) {
-      if (!bridge) return;
-      await pollWorkflow();
-      if (full) await refreshCounts();
-      if (!bridge) return;
-      const doc = buildDoc();
-      runtime.lastDocJson = JSON.stringify(doc);
-      bridge.publishState(doc, (e) => {
+      runtime.lastPublishedStateJson = JSON.stringify(stateMessage);
+      bridge.publishState(stateMessage, (e) => {
         if (e) log(`state publish failed: ${e?.message ?? e}`);
       });
-      armPublishTimer(doc);
+      armPublishTimer(stateMessage);
     }
-    function armPublishTimer(doc) {
+    function armPublishTimer(stateMessage) {
       if (publishTimer) {
         clearTimeout(publishTimer);
         publishTimer = null;
       }
       if (!bridge) return;
-      const interval = doc.shot_active ? ACTIVE_SHOT_PUBLISH_INTERVAL_MS : config.publishIntervalMs;
+      const interval = stateMessage.shot_active ? ACTIVE_SHOT_PUBLISH_INTERVAL_MS : config.publishIntervalMs;
       publishTimer = setTimeout(() => {
         publishTimer = null;
         publish();
@@ -12589,57 +12622,55 @@ In order to be iterable, non-array objects must have a [Symbol.iterator]() metho
     }
     function onStateUpdate(payload) {
       runtime.snapshot = payload;
-      const state = mapState(payload.state?.state ?? payload.state);
-      const substate = mapSubstate(payload.state?.substate ?? payload.substate) ?? "";
-      const active = isShotActive(state, substate);
+      const rawState = payload.state?.state ?? payload.state;
+      const rawSubstate = payload.state?.substate ?? payload.substate;
+      const state = mapState(rawState);
+      const substate = mapSubstate(rawSubstate) ?? "";
+      const shotActive = isShotActive(state, substate);
       const transitioned = state !== runtime.lastState || substate !== runtime.lastSubstate;
       runtime.lastState = state;
       runtime.lastSubstate = substate;
-      if (active && runtime.shot?.active !== true) {
+      if (shotActive && runtime.shot?.active !== true) {
         runtime.shot = { active: true };
         runtime.shotWeightG = null;
-      } else if (!active && runtime.shot?.active === true) {
+      } else if (!shotActive && runtime.shot?.active === true) {
         runtime.shot = { ...runtime.shot, active: false };
       }
       if (transitioned) publish();
     }
     async function onShotStored(payload) {
-      const id = payload?.id;
-      if (!id) return;
+      const shotId = payload?.id;
+      if (!shotId) return;
       try {
-        const res = await fetch(`${LOCAL_API_BASE}/api/v1/shots/${id}`);
-        if (!res.ok) {
-          log(`shot fetch failed: ${res.status}`);
-          return;
-        }
-        const record = await res.json();
+        const record = await api.fetchShotRecord(shotId);
+        if (!record) return;
         const measurements = Array.isArray(record.measurements) ? record.measurements : [];
-        const first = measurements[0];
-        const last = measurements[measurements.length - 1];
+        const firstSample = measurements[0];
+        const lastSample = measurements[measurements.length - 1];
         let durationS = null;
-        if (first && last) {
-          const start = new Date(first.machine?.timestamp).getTime();
-          const end = new Date(last.machine?.timestamp).getTime();
-          if (Number.isFinite(start) && Number.isFinite(end)) {
-            durationS = Math.max(0, (end - start) / 1e3);
+        if (firstSample && lastSample) {
+          const startMs = new Date(firstSample.machine?.timestamp).getTime();
+          const endMs = new Date(lastSample.machine?.timestamp).getTime();
+          if (Number.isFinite(startMs) && Number.isFinite(endMs)) {
+            durationS = Math.max(0, (endMs - startMs) / 1e3);
           }
         }
         const actualYield = record.annotations?.actualYield;
-        const finalWeight = typeof actualYield === "number" ? actualYield : last?.scale?.weight ?? null;
+        const finalWeight = typeof actualYield === "number" ? actualYield : lastSample?.scale?.weight ?? null;
         if (typeof actualYield !== "number") {
-          log(`shot ${id} has no actualYield; falling back to the last scale sample`);
+          log(`shot ${shotId} has no actualYield; falling back to the last scale sample`);
         }
         runtime.shot = {
           active: false,
-          id: record.id ?? id,
+          id: record.id ?? shotId,
           startedAt: record.timestamp ?? null,
           durationS,
           weightG: finalWeight
         };
         runtime.shotWeightG = finalWeight;
-        await publish({ full: true });
+        await publish({ refreshCountsFirst: true });
       } catch (e) {
-        log(`shot record fetch failed: ${e?.message ?? e}`);
+        log(`shot ${shotId} processing failed: ${e?.message ?? e}`);
       }
     }
     async function onWorkflowUpdated(payload) {
@@ -12649,78 +12680,50 @@ In order to be iterable, non-array objects must have a [Symbol.iterator]() metho
       const title = payload?.profile?.title;
       if (typeof title === "string" && title !== runtime.profile) {
         runtime.profile = title;
-        runtime.profileFilename = await resolveProfileFilename(title);
+        runtime.profileFilename = await findProfileIdByTitle(title);
       }
     }
     async function pollWorkflow() {
-      try {
-        const res = await fetch(`${LOCAL_API_BASE}/api/v1/workflow`);
-        if (!res.ok) return;
-        await applyWorkflowPayload(await res.json());
-      } catch (e) {
-        log(`workflow poll failed: ${e?.message ?? e}`);
-      }
+      const workflow = await api.fetchWorkflow();
+      if (workflow) await applyWorkflowPayload(workflow);
     }
-    async function resolveProfileFilename(title) {
-      try {
-        const res = await fetch(`${LOCAL_API_BASE}/api/v1/profiles`);
-        if (!res.ok) return "";
-        const records = await res.json();
-        if (!Array.isArray(records)) return "";
-        const match = records.find((r) => r.profile?.title === title);
-        return match?.id ?? "";
-      } catch {
-        return "";
-      }
-    }
-    function countFrom(payload, what) {
-      if (Array.isArray(payload)) return payload.length;
-      if (payload && typeof payload.total === "number") return payload.total;
-      log(`${what} count: unrecognised response shape, keeping the previous value`);
-      return null;
+    async function findProfileIdByTitle(title) {
+      const records = await api.fetchProfiles();
+      if (!Array.isArray(records)) return "";
+      const match = records.find((record) => record.profile?.title === title);
+      return match?.id ?? "";
     }
     async function refreshCounts() {
-      try {
-        const [shotsRes, steamsRes] = await Promise.all([
-          fetch(`${LOCAL_API_BASE}/api/v1/shots?limit=1`),
-          fetch(`${LOCAL_API_BASE}/api/v1/steams?limit=1`)
-        ]);
-        if (shotsRes.ok) {
-          const n = countFrom(await shotsRes.json(), "espresso");
-          if (n !== null) runtime.espressoCount = n;
-        }
-        if (steamsRes.ok) {
-          const n = countFrom(await steamsRes.json(), "steaming");
-          if (n !== null) runtime.steamingCount = n;
-        }
-      } catch (e) {
-        log(`count refresh failed: ${e?.message ?? e}`);
-      }
+      const [espressoCount, steamingCount] = await Promise.all([
+        api.fetchCollectionCount("/api/v1/shots?limit=1", "espresso"),
+        api.fetchCollectionCount("/api/v1/steams?limit=1", "steaming")
+      ]);
+      if (espressoCount !== null) runtime.espressoCount = espressoCount;
+      if (steamingCount !== null) runtime.steamingCount = steamingCount;
     }
-    function startAll() {
+    function buildAndStartServices() {
       dispatcher = new CommandDispatcher({
         fetchImpl: fetch,
-        currentStateProvider: publishedState
+        currentStateProvider: lastPublishedMachineState
       });
       bridge = createMqttBridge({
         host,
         config,
-        onCommand: createCommandHandler(dispatcher, log, () => {
-        }),
+        onCommand: createCommandHandler(dispatcher, log),
         log
       });
       bridge.onConnectedHandler = () => {
-        publish({ full: true });
+        publish({ refreshCountsFirst: true });
       };
       bridge.start();
       scaleStream = createLoopbackJsonStream({
         host,
         path: "/ws/v1/scale/snapshot",
-        onJson: (data) => {
-          if (typeof data.weight === "number") {
-            runtime.shotWeightG = data.weight;
+        onJson: (snapshot) => {
+          if (typeof snapshot.weight === "number") {
+            runtime.shotWeightG = snapshot.weight;
             if (runtime.shot?.active) {
-              runtime.shot.weightG = data.weight;
+              runtime.shot.weightG = snapshot.weight;
             }
           }
         },
@@ -12733,9 +12736,9 @@ In order to be iterable, non-array objects must have a [Symbol.iterator]() metho
       waterStream = createLoopbackJsonStream({
         host,
         path: "/ws/v1/machine/waterLevels",
-        onJson: (data) => {
-          if (typeof data.currentLevel !== "number") return;
-          runtime.waterLevelMm = data.currentLevel;
+        onJson: (waterLevelReading) => {
+          if (typeof waterLevelReading.currentLevel !== "number") return;
+          runtime.waterLevelMm = waterLevelReading.currentLevel;
         },
         log
       });
@@ -12759,31 +12762,31 @@ In order to be iterable, non-array objects must have a [Symbol.iterator]() metho
         bridge = null;
       }
       dispatcher = null;
-      runtime.lastDocJson = null;
+      runtime.lastPublishedStateJson = null;
     }
     return {
       id: PLUGIN_ID,
       async onLoad(settings) {
         const storedUniqueId = await storage.read(UNIQUE_ID_KEY);
-        const { config: normalized, uniqueId, errors } = normalizeConfig(settings, storedUniqueId);
+        const { config: normalized, uniqueId, warnings } = normalizeConfig(settings, storedUniqueId);
         if (!storedUniqueId) {
           storage.write(UNIQUE_ID_KEY, uniqueId);
         }
-        for (const err of errors) {
-          log(`config warning: ${err}`);
+        for (const warning of warnings) {
+          log(`config warning: ${warning}`);
         }
         config = normalized;
         if (!config.enabled) {
           log("disabled: no broker host configured");
           return;
         }
-        startAll();
+        buildAndStartServices();
       },
       async onUnload() {
         await stopAll();
       },
       onEvent(event) {
-        if (storage.settle(event)) return;
+        if (storage.resolvePendingRead(event)) return;
         switch (event?.name) {
           case "stateUpdate":
             onStateUpdate(event.payload);

@@ -77,6 +77,5 @@ export function deriveSteamFields(publishedState, steamDisabled, ecoSteamOn) {
 }
 
 export function isShotActive(publishedState, substate) {
-  if (publishedState === "Espresso") return true;
-  return substate === "preinfusion" || substate === "pouring";
+  return publishedState === "Espresso";
 }

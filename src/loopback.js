@@ -1,4 +1,3 @@
-export const LOCAL_API_BASE = "http://localhost:8080";
 export const LOCAL_WS_BASE = "ws://localhost:8080";
 
 export function createLoopbackJsonStream({ host, path, onJson, onStatus, log }) {
@@ -22,17 +21,17 @@ export function createLoopbackJsonStream({ host, path, onJson, onStatus, log }) 
   async function connect() {
     if (stopped || handle !== null) return;
     try {
-      const opened = await host.transport.open({
+      const openResult = await host.transport.open({
         kind: "websocket",
         url,
       });
       if (stopped) {
-        host.transport.close(opened.handle);
+        host.transport.close(openResult.handle);
         return;
       }
-      handle = opened.handle;
+      handle = openResult.handle;
       backoffMs = 2000;
-      host.transport.onEvent(opened.handle, (event) => {
+      host.transport.onEvent(openResult.handle, (event) => {
         switch (event.type) {
           case "data": {
             if (event.dataType !== "text") return;
@@ -91,7 +90,7 @@ export function createLoopbackJsonStream({ host, path, onJson, onStatus, log }) 
   return {
     start,
     stop,
-    get healthy() {
+    get connected() {
       return connected;
     },
   };

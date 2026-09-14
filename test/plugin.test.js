@@ -2,10 +2,11 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { normalizeConfig, generateUniqueId, UNIQUE_ID_KEY } from "../src/config.js";
 import { STATE_MAP, SUBSTATE_MAP, mapState, mapSubstate, deriveWakeState, deriveSteamFields, isShotActive } from "../src/mapping.js";
-import { buildStateDocument, offlineDocument, waterTankLevelToMilliliters } from "../src/state-doc.js";
+import { buildStateMessage, offlineStateMessage, waterTankLevelToMilliliters } from "../src/state-doc.js";
 import { parseCommand } from "../src/commands.js";
 import { CommandDispatcher } from "../src/dispatcher.js";
 import { createCommandHandler } from "../src/command-handler.js";
+import { createDecaidApi } from "../src/decaid-api.js";
 
 test("generateUniqueId returns 8 hex chars", () => {
   const id = generateUniqueId();
@@ -13,8 +14,8 @@ test("generateUniqueId returns 8 hex chars", () => {
 });
 
 test("normalizeConfig applies de1app-compatible defaults", () => {
-  const { config, errors, uniqueId } = normalizeConfig({ Host: "broker.local" }, "abcd1234");
-  assert.deepEqual(errors, []);
+  const { config, warnings, uniqueId } = normalizeConfig({ Host: "broker.local" }, "abcd1234");
+  assert.deepEqual(warnings, []);
   assert.equal(uniqueId, "abcd1234");
   assert.equal(config.enabled, true);
   assert.equal(config.host, "broker.local");
@@ -32,10 +33,10 @@ test("normalizeConfig disables when host is empty", () => {
 });
 
 test("normalizeConfig validates port and interval", () => {
-  const { errors } = normalizeConfig({ Host: "h", Port: 0, PublishIntervalMs: 10 }, null);
-  assert.equal(errors.length, 2);
+  const { warnings } = normalizeConfig({ Host: "h", Port: 0, PublishIntervalMs: 10 }, null);
+  assert.equal(warnings.length, 2);
   const ok = normalizeConfig({ Host: "h", Port: 1883, PublishIntervalMs: 1000, EnableTls: false }, null);
-  assert.deepEqual(ok.errors, []);
+  assert.deepEqual(ok.warnings, []);
   assert.equal(ok.config.port, 1883);
   assert.equal(ok.config.publishIntervalMs, 1000);
   assert.equal(ok.config.enableTls, false);
@@ -65,24 +66,34 @@ test("derived fields follow the documented rules", () => {
   assert.deepEqual(deriveSteamFields("Idle", false, false), { steam_mode: "On", steam_state: true });
 });
 
-test("isShotActive covers espresso state and pouring substates", () => {
-  assert.equal(isShotActive("Espresso", "ready"), true);
-  assert.equal(isShotActive("Idle", "preinfusion"), true);
-  assert.equal(isShotActive("Idle", "pouring"), true);
+test("isShotActive covers every substate of an espresso", () => {
+  for (const substate of ["heating", "preinfusion", "pouring", "ending", "ready"]) {
+    assert.equal(isShotActive("Espresso", substate), true, `Espresso/${substate}`);
+  }
+});
+
+test("isShotActive ignores steam, flush and hot water", () => {
+  // These all report a `pouring` substate of their own; none of them is a shot.
+  for (const state of ["Steam", "SteamRinse", "HotWater", "HotWaterRinse"]) {
+    assert.equal(isShotActive(state, "pouring"), false, `${state}/pouring`);
+    assert.equal(isShotActive(state, "heating"), false, `${state}/heating`);
+  }
+  assert.equal(isShotActive("Idle", "pouring"), false);
+  assert.equal(isShotActive("Idle", "preinfusion"), false);
   assert.equal(isShotActive("Idle", "ready"), false);
 });
 
 test("offline document has exactly online and de1_connected", () => {
-  assert.deepEqual(offlineDocument(), { online: false, de1_connected: false });
+  assert.deepEqual(offlineStateMessage(), { online: false, de1_connected: false });
 });
 
 test("state document when machine disconnected contains only availability fields", () => {
-  const doc = buildStateDocument({ snapshot: null });
+  const doc = buildStateMessage({ snapshot: null });
   assert.deepEqual(Object.keys(doc), ["online", "de1_connected"]);
 });
 
 test("state document contains all de1app fields plus shot fields", () => {
-  const doc = buildStateDocument({
+  const doc = buildStateMessage({
     snapshot: {
       state: { state: "idle", substate: "pouring" },
       groupTemperature: 93.5,
@@ -119,7 +130,7 @@ test("state document contains all de1app fields plus shot fields", () => {
 });
 
 test("post-shot fields populate from the completed shot", () => {
-  const doc = buildStateDocument({
+  const doc = buildStateMessage({
     snapshot: { state: { state: "idle", substate: "idle" } },
     shot: {
       active: false,
@@ -348,4 +359,67 @@ test("command handler logs unknown payloads", async () => {
 
 test("UNIQUE_ID_KEY is stable", () => {
   assert.equal(UNIQUE_ID_KEY, "uniqueId");
+});
+
+test("decaid api returns parsed json and logs failures on non-quiet endpoints", async () => {
+  const logs = [];
+  const { fetchImpl } = mockFetch([
+    {
+      match: /\/api\/v1\/workflow$/,
+      method: "GET",
+      respond: () => ({ ok: true, status: 200, json: async () => ({ profile: { title: "X" } }) }),
+    },
+  ]);
+  const api = createDecaidApi({ fetchImpl, log: (m) => logs.push(m) });
+  assert.deepEqual(await api.fetchWorkflow(), { profile: { title: "X" } });
+  assert.equal(await api.fetchShotRecord("nope"), null);
+  assert.match(logs[0], /GET \/api\/v1\/shots\/nope failed: 404/);
+});
+
+test("decaid api quiet endpoints fail silently", async () => {
+  const logs = [];
+  const { fetchImpl } = mockFetch([]);
+  const api = createDecaidApi({ fetchImpl, log: (m) => logs.push(m) });
+  assert.equal(await api.fetchWorkflow(), null);
+  assert.equal(await api.fetchProfiles(), null);
+  assert.equal(await api.fetchCollectionCount("/api/v1/shots?limit=1", "espresso"), null);
+  assert.deepEqual(logs, []);
+});
+
+test("decaid api reads lifetime counts from both response shapes", async () => {
+  const logs = [];
+  const { fetchImpl } = mockFetch([
+    {
+      match: /\/api\/v1\/shots\?/,
+      method: "GET",
+      respond: () => ({ ok: true, status: 200, json: async () => ({ items: [], total: 42 }) }),
+    },
+    {
+      match: /\/api\/v1\/steams\?/,
+      method: "GET",
+      respond: () => ({ ok: true, status: 200, json: async () => [{ id: "s1" }, { id: "s2" }] }),
+    },
+    {
+      match: /\/api\/v1\/weird\?/,
+      method: "GET",
+      respond: () => ({ ok: true, status: 200, json: async () => ({ items: [] }) }),
+    },
+  ]);
+  const api = createDecaidApi({ fetchImpl, log: (m) => logs.push(m) });
+  assert.equal(await api.fetchCollectionCount("/api/v1/shots?limit=1", "espresso"), 42);
+  assert.equal(await api.fetchCollectionCount("/api/v1/steams?limit=1", "steaming"), 2);
+  assert.equal(await api.fetchCollectionCount("/api/v1/weird?limit=1", "weird"), null);
+  assert.match(logs[0], /weird count: unrecognised response shape/);
+});
+
+test("decaid api logs exceptions on non-quiet endpoints", async () => {
+  const logs = [];
+  const api = createDecaidApi({
+    fetchImpl: async () => {
+      throw new Error("boom");
+    },
+    log: (m) => logs.push(m),
+  });
+  assert.equal(await api.fetchShotRecord("x"), null);
+  assert.match(logs[0], /GET \/api\/v1\/shots\/x failed: boom/);
 });
