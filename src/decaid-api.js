@@ -46,5 +46,9 @@ export function createDecaidApi({ fetchImpl, log }) {
     return readCountFromResponse(payload, countKind);
   }
 
-  return { fetchShotRecord, fetchWorkflow, fetchProfiles, fetchCollectionCount };
+  async function fetchMachineInfo() {
+    return getJson("/api/v1/machine/info", { quiet: true });
+  }
+
+  return { fetchShotRecord, fetchWorkflow, fetchProfiles, fetchCollectionCount, fetchMachineInfo };
 }

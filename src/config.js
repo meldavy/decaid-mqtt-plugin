@@ -3,6 +3,7 @@ export const DEFAULT_PUBLISH_INTERVAL_MS = 60000;
 export const MIN_PUBLISH_INTERVAL_MS = 1000;
 export const ACTIVE_SHOT_PUBLISH_INTERVAL_MS = 1000;
 export const UNIQUE_ID_KEY = "uniqueId";
+export const DISCOVERY_TOPICS_KEY = "discoveryTopics";
 
 export function generateUniqueId() {
   const randomValue = Math.floor(Math.random() * 0xffffffff);
@@ -58,6 +59,7 @@ export function normalizeConfig(raw, storedUniqueId) {
       publishIntervalMs,
       enableTls,
       uniqueId,
+      haAutoDiscoveryEnable: Boolean(raw.HaAutoDiscoveryEnable),
     },
   };
 }

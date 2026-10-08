@@ -21,13 +21,14 @@ export async function startE2E({ settings = {}, authenticate, seedStore, port, s
     seedStore,
   });
 
-  async function stop() {
-    await plugin.unload();
+  const env = { sim, simPort, broker, plugin };
+  env.stop = async function stop() {
+    await env.plugin.unload();
     await broker.close();
     await sim.stop();
-  }
+  };
 
-  return { sim, simPort, broker, plugin, stop };
+  return env;
 }
 
 export async function connectConsumer(brokerPort, topic) {

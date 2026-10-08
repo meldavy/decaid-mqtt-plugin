@@ -101,6 +101,7 @@ export function createDecaidSim() {
     if (req.method === "GET" && url.pathname === "/api/v1/steams") return json(200, state.steams);
     if (req.method === "GET" && url.pathname === "/api/v1/profiles") return json(200, state.profiles);
     if (req.method === "GET" && url.pathname === "/api/v1/workflow") return json(200, state.workflow);
+    if (req.method === "GET" && url.pathname === "/api/v1/machine/info") return json(200, state.machineInfo ?? { model: "DE1PRO" });
     const shotMatch = url.pathname.match(/^\/api\/v1\/shots\/([^/]+)$/);
     if (req.method === "GET" && shotMatch) {
       const shot = state.shots.find((s) => s.id === decodeURIComponent(shotMatch[1]));

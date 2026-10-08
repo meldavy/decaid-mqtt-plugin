@@ -2,6 +2,7 @@ import {
   normalizeConfig,
   generateUniqueId,
   UNIQUE_ID_KEY,
+  DISCOVERY_TOPICS_KEY,
   ACTIVE_SHOT_PUBLISH_INTERVAL_MS,
 } from "./config.js";
 import { buildStateMessage } from "./state-doc.js";
@@ -13,6 +14,7 @@ import { createMqttBridge } from "./bridge.js";
 import { createLoopbackJsonStream } from "./loopback.js";
 import { createStorageAdapter } from "./storage.js";
 import { createDecaidApi } from "./decaid-api.js";
+import { buildDiscoveryConfigs, discoveryTopics } from "./discovery.js";
 
 export const PLUGIN_ID = "mqtt.reaplugin";
 
@@ -31,6 +33,7 @@ export function createPlugin(host) {
   let waterStream = null;
   let publishTimer = null;
   let dispatcher = null;
+  let discoveryQueue = Promise.resolve();
 
 
   const runtime = {
@@ -48,6 +51,7 @@ export function createPlugin(host) {
     lastPublishedStateJson: null,
     lastState: null,
     lastSubstate: null,
+    lastDiscoveryTopics: null,
   };
 
   function lastPublishedMachineState() {
@@ -219,19 +223,82 @@ export function createPlugin(host) {
     if (steamingCount !== null) runtime.steamingCount = steamingCount;
   }
 
+  function publishDiscoveryBatch(publish, entries) {
+    return new Promise((resolve, reject) => {
+      const started = publish(entries, (error) => error ? reject(error) : resolve());
+      if (!started) reject(new Error("MQTT client is not connected"));
+    });
+  }
+
+  async function syncDiscovery() {
+    if (!bridge) return;
+    try {
+      let configs = [];
+      if (config.haAutoDiscoveryEnable) {
+        const [machineInfo, profiles] = await Promise.all([
+          api.fetchMachineInfo(),
+          api.fetchProfiles(),
+        ]);
+        const profileTitles = Array.isArray(profiles)
+          ? profiles.map((p) => p.profile?.title).filter(Boolean)
+          : [];
+        configs = buildDiscoveryConfigs({ config, deviceInfo: machineInfo, profileTitles });
+      }
+
+      const newTopics = discoveryTopics(configs);
+      // The first version that persisted discovery topics cannot know what an
+      // older version retained. Derive the complete topic inventory for this
+      // device so an initial sync can still remove entities that are no longer
+      // present (for example profile_select when the profile list is empty).
+      const knownConfigs = buildDiscoveryConfigs({
+        config,
+        deviceInfo: null,
+        profileTitles: ["__discovery_topic_inventory__"],
+      });
+      const previousTopics = [...new Set([
+        ...(runtime.lastDiscoveryTopics ?? []),
+        ...discoveryTopics(knownConfigs),
+      ])];
+      const newTopicSet = new Set(newTopics);
+      const staleTopics = previousTopics.filter((topic) => !newTopicSet.has(topic));
+
+      if (staleTopics.length > 0) {
+        await publishDiscoveryBatch((topics, done) => bridge.retractDiscovery(topics, done), staleTopics);
+        log(`retracted ${staleTopics.length} stale HA discovery entities`);
+      }
+      if (configs.length > 0) {
+        await publishDiscoveryBatch((items, done) => bridge.publishDiscovery(items, done), configs);
+      }
+
+      runtime.lastDiscoveryTopics = newTopics.length > 0 ? newTopics : null;
+      storage.write(DISCOVERY_TOPICS_KEY, JSON.stringify(newTopics));
+      if (configs.length > 0) log(`published ${configs.length} HA discovery entities`);
+    } catch (e) {
+      log(`HA discovery sync failed; will retry on next connection: ${e?.message ?? e}`);
+    }
+  }
+
+  function publishDiscovery() {
+    const operation = discoveryQueue.then(syncDiscovery, syncDiscovery);
+    discoveryQueue = operation;
+    return operation;
+  }
+
   function buildAndStartServices() {
     dispatcher = new CommandDispatcher({
       fetchImpl: fetch,
       currentStateProvider: lastPublishedMachineState,
     });
+    const onProfileCommand = config.haAutoDiscoveryEnable ? () => publishDiscovery() : null;
     bridge = createMqttBridge({
       host,
       config,
-      onCommand: createCommandHandler(dispatcher, log),
+      onCommand: createCommandHandler(dispatcher, log, onProfileCommand),
       log,
     });
     bridge.onConnectedHandler = () => {
       publish({ refreshCountsFirst: true });
+      publishDiscovery();
     };
     bridge.start();
 
@@ -291,6 +358,17 @@ export function createPlugin(host) {
 
     async onLoad(settings) {
       const storedUniqueId = await storage.read(UNIQUE_ID_KEY);
+      const storedTopicsJson = await storage.read(DISCOVERY_TOPICS_KEY);
+      if (storedTopicsJson) {
+        try {
+          const storedTopics = JSON.parse(storedTopicsJson);
+          runtime.lastDiscoveryTopics = Array.isArray(storedTopics)
+            ? storedTopics.filter((topic) => typeof topic === "string")
+            : null;
+        } catch {
+          // ignore invalid json
+        }
+      }
       const { config: normalized, uniqueId, warnings } = normalizeConfig(settings, storedUniqueId);
       if (!storedUniqueId) {
         storage.write(UNIQUE_ID_KEY, uniqueId);

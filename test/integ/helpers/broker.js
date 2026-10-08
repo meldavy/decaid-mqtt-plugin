@@ -175,11 +175,15 @@ export async function startBroker({ authenticate, port: fixedPort, maxProtocolVe
       }, session?.version ?? 4);
     }
     if (packet.retain) {
-      retained.set(packet.topic, {
-        topic: packet.topic,
-        payload: record.payload,
-        qos: packet.qos,
-      });
+      if (record.payload.length === 0) {
+        retained.delete(packet.topic);
+      } else {
+        retained.set(packet.topic, {
+          topic: packet.topic,
+          payload: record.payload,
+          qos: packet.qos,
+        });
+      }
     }
     route(record, session?.clientId ?? null);
   }
@@ -263,6 +267,7 @@ export async function startBroker({ authenticate, port: fixedPort, maxProtocolVe
     connections,
     publishes,
     subscriptions,
+    retained,
     crashClient,
     publish,
     close,

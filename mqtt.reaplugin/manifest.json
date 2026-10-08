@@ -61,6 +61,12 @@
       "label": "Use TLS",
       "default": true,
       "description": "Connect to the broker over TLS."
+    },
+    "HaAutoDiscoveryEnable": {
+      "type": "boolean",
+      "label": "Enable HA Auto-Discovery",
+      "default": false,
+      "description": "Publish Home Assistant MQTT discovery entities on broker connect."
     }
   }
 }
